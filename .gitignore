@@ -1,0 +1,17 @@
+*.jpg
+*.png
+*.pth
+*.pt
+*.log
+*.txt
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+*.pywz
+*.pyzw
+*.pyz
+*.pkl
+*.tar
+*.json

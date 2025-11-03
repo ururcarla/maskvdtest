@@ -205,20 +205,20 @@ def val_pass(device, model, data, config, output_file):
 
 
 def main():
-    config = initialize_run(config_location=Path("configs", "evaluate", "vitdet_vid"))
+    config = initialize_run(config_location=Path("./configs", "evaluate", "vitdet_vid"))
     long_edge = max(config["model"]["input_shape"][-2:])
     train_data = VID(
-        Path("/data1", "vid_data"),
+        Path("./data1", "vid_data"),
         split="vid_train",
-        tar_path=Path("/data1", "vid_data.tar"),
+        tar_path=Path("./data1", "vid_data.tar"),
         combined_transform=VIDResize(
             short_edge_length=640 * long_edge // 1024, max_size=long_edge
         ),
     )
     val_data = VID(
-        Path("/data1", "vid_data"),
+        Path("./data1", "vid_data"),
         split="vid_val",
-        tar_path=Path("/data1", "vid_data.tar"),
+        tar_path=Path("./data1", "vid_data.tar"),
         combined_transform=VIDResize(
             short_edge_length=640 * long_edge // 1024, max_size=long_edge
         ),

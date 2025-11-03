@@ -1,8 +1,10 @@
 name: eventful-transformer
 channels:
   - defaults
+  - conda-forge
 dependencies:
-  - ffmpeg=4.2
+  - av=10.0.*
+  - ffmpeg=4.4.*
   - matplotlib=3.7
   - numpy=1.23
   - nvidia::cuda=11.8
@@ -19,7 +21,7 @@ dependencies:
   - torchmetrics=0.11
   - tqdm=4.65.*
   - pip:
-      - av==10.0.*
+      # - av==10.0.*
       - omegaconf==2.3.*
       - opencv-python==4.7.*  # Required for Detectron visualizer
       - timm
