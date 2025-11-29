@@ -25,7 +25,6 @@ from util.lr_sched import LR_Scheduler
 from torchprofile import profile_macs
 import numpy as np
 from utils.image import pad_to_size, rescale
-from supervision.tracker.byte_tracker.core import ByteTrack
 import supervision as sv
 
 
@@ -150,7 +149,7 @@ def val_pass(device, model, data, config, output_file):
                                                region_sparsity=1 - config["sparsity"]) # sparsity is keep rate 
 
     tracker_cfg = config.get("tracker", {})
-    tracker = ByteTrack(
+    tracker = sv.ByteTrack(
         track_activation_threshold=tracker_cfg.get(
             "track_activation_threshold", 0.25
         ),
