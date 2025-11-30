@@ -76,18 +76,25 @@ def get_region_mask_static(short_edge_length, max_size, region_size=16, region_s
 
 
 def results_to_supervision_detections(result):
-    boxes = result["boxes"].detach().cpu()
+    boxes = result["boxes"].detach()
     if boxes.numel() == 0:
         detections = sv.Detections.empty()
         detections.confidence = np.empty((0,), dtype=np.float32)
         detections.class_id = np.empty((0,), dtype=np.int64)
         return detections
-    scores = result["scores"].detach().cpu()
-    class_ids = result["labels"].detach().cpu()
+    scores = result["scores"].detach()
+    class_ids = result["labels"].detach()
+
+    results = torch.cat((boxes, scores.unsqueeze(-1), class_ids.unsqueeze(-1)), dim=1).cpu().numpy()
+
+    boxes = results[:, :4]
+    scores = results[:, 4]
+    class_ids = results[:, 5].astype(np.int64, copy=False)
+    
     return sv.Detections(
-        xyxy=boxes.numpy(),
-        confidence=scores.numpy(),
-        class_id=class_ids.numpy(),
+        xyxy=boxes,
+        confidence=scores,
+        class_id=class_ids,
     )
 
 
@@ -226,7 +233,7 @@ def val_pass(device, model, data, config, output_file):
         macs = profile_macs(model.backbone, (x, None, 12, mask_index_test))
         tee_print(f'GFLOPs (torchprofile): {macs / 1e9}', output_file)
 
-    mean_ap = MeanAveragePrecision()
+    mean_ap = MeanAveragePrecision().to(device)
     mean_ap.update(outputs, labels)
     metrics = mean_ap.compute()
 
