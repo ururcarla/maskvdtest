@@ -14,6 +14,7 @@ from utils.evaluate import run_evaluations
 from utils.misc import dict_to_device, squeeze_dict, get_pytorch_device
 from torch import optim
 from datetime import datetime
+from time import perf_counter
 from torch.utils.tensorboard import SummaryWriter
 from detectron2.data.detection_utils import annotations_to_instances, BoxMode
 from detectron2.utils.events import EventStorage
@@ -130,7 +131,9 @@ def val_pass(device, model, data, config, output_file):
     outputs = []
     labels = []
     total_sparsity = 0 
-    latency = 0
+    model_latency = 0
+    system_latency = 0
+    tracker_latency = 0
     memory = 0
     n_items = config.get("n_items", len(data))
     count = 0
@@ -196,6 +199,7 @@ def val_pass(device, model, data, config, output_file):
                         mask_index = None
                         sparsity = 0
                
+                system_start = perf_counter()
                 starter.record()
                 results, _ = model(frame.to(device), mask_index)
                 ender.record()
@@ -203,7 +207,10 @@ def val_pass(device, model, data, config, output_file):
                 curr_time = starter.elapsed_time(ender)
 
                 detections = results_to_supervision_detections(results[0])
+                tracker_start = perf_counter()
                 tracked = tracker.update_with_detections(detections)
+                tracker_latency += (perf_counter() - tracker_start) * 1000
+                system_latency += (perf_counter() - system_start) * 1000
                 if is_key_frame:
                     outputs.extend(results)
                 else:
@@ -211,7 +218,7 @@ def val_pass(device, model, data, config, output_file):
                 step += 1
                 count += 1
                 total_sparsity += sparsity
-                latency += curr_time
+                model_latency += curr_time
                 MB = 1024 * 1024
                 memory += torch.cuda.max_memory_allocated() / MB
 
@@ -221,7 +228,9 @@ def val_pass(device, model, data, config, output_file):
     counts = model.total_counts() / n_frames
 
     tee_print(f'Sparsity: {total_sparsity / count}', output_file)
-    tee_print(f'Latency: {latency / count} ms', output_file)
+    tee_print(f'Model latency (GPU): {model_latency / count} ms', output_file)
+    tee_print(f'System latency: {system_latency / count} ms', output_file)
+    tee_print(f'Tracker latency: {tracker_latency / count} ms', output_file)
     tee_print(f'Memory: {memory / count} MB', output_file)
     if config["model"]["backbone_config"]["backbone"] == "windowed":
         tee_print(f'GFLOPs: {sum([value for _, value in counts.items()]) / 1e9}', output_file)
