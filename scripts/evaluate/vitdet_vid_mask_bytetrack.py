@@ -19,6 +19,7 @@ from utils.evaluate import run_evaluations
 from utils.misc import dict_to_device, squeeze_dict, get_pytorch_device
 from torch import optim
 from datetime import datetime
+from time import perf_counter
 from torch.utils.tensorboard import SummaryWriter
 from detectron2.data.detection_utils import annotations_to_instances, BoxMode
 from detectron2.utils.events import EventStorage
@@ -81,18 +82,25 @@ def get_region_mask_static(short_edge_length, max_size, region_size=16, region_s
 
 
 def results_to_supervision_detections(result):
-    boxes = result["boxes"].detach().cpu()
+    boxes = result["boxes"].detach()
     if boxes.numel() == 0:
         detections = sv.Detections.empty()
         detections.confidence = np.empty((0,), dtype=np.float32)
         detections.class_id = np.empty((0,), dtype=np.int64)
         return detections
-    scores = result["scores"].detach().cpu()
-    class_ids = result["labels"].detach().cpu()
+    scores = result["scores"].detach()
+    class_ids = result["labels"].detach()
+
+    results = torch.cat((boxes, scores.unsqueeze(-1), class_ids.unsqueeze(-1)), dim=1).cpu().numpy()
+
+    boxes = results[:, :4]
+    scores = results[:, 4]
+    class_ids = results[:, 5].astype(np.int64, copy=False)
+    
     return sv.Detections(
-        xyxy=boxes.numpy(),
-        confidence=scores.numpy(),
-        class_id=class_ids.numpy(),
+        xyxy=boxes,
+        confidence=scores,
+        class_id=class_ids,
     )
 
 
@@ -128,7 +136,9 @@ def val_pass(device, model, data, config, output_file):
     outputs = []
     labels = []
     total_sparsity = 0 
-    latency = 0
+    model_latency = 0
+    system_latency = 0
+    tracker_latency = 0
     memory = 0
     n_items = config.get("n_items", len(data))
     count = 0
@@ -194,6 +204,7 @@ def val_pass(device, model, data, config, output_file):
                         mask_index = None
                         sparsity = 0
                
+                system_start = perf_counter()
                 starter.record()
                 results, _ = model(frame.to(device), mask_index)
                 ender.record()
@@ -201,7 +212,10 @@ def val_pass(device, model, data, config, output_file):
                 curr_time = starter.elapsed_time(ender)
 
                 detections = results_to_supervision_detections(results[0])
+                tracker_start = perf_counter()
                 tracked = tracker.update_with_detections(detections)
+                tracker_latency += (perf_counter() - tracker_start) * 1000
+                system_latency += (perf_counter() - system_start) * 1000
                 if is_key_frame:
                     outputs.extend(results)
                 else:
@@ -209,7 +223,7 @@ def val_pass(device, model, data, config, output_file):
                 step += 1
                 count += 1
                 total_sparsity += sparsity
-                latency += curr_time
+                model_latency += curr_time
                 MB = 1024 * 1024
                 memory += torch.cuda.max_memory_allocated() / MB
 
@@ -219,7 +233,9 @@ def val_pass(device, model, data, config, output_file):
     counts = model.total_counts() / n_frames
 
     tee_print(f'Sparsity: {total_sparsity / count}', output_file)
-    tee_print(f'Latency: {latency / count} ms', output_file)
+    tee_print(f'Model latency (GPU): {model_latency / count} ms', output_file)
+    tee_print(f'System latency: {system_latency / count} ms', output_file)
+    tee_print(f'Tracker latency: {tracker_latency / count} ms', output_file)
     tee_print(f'Memory: {memory / count} MB', output_file)
     if config["model"]["backbone_config"]["backbone"] == "windowed":
         tee_print(f'GFLOPs: {sum([value for _, value in counts.items()]) / 1e9}', output_file)
@@ -231,7 +247,7 @@ def val_pass(device, model, data, config, output_file):
         macs = profile_macs(model.backbone, (x, None, 12, mask_index_test))
         tee_print(f'GFLOPs (torchprofile): {macs / 1e9}', output_file)
 
-    mean_ap = MeanAveragePrecision()
+    mean_ap = MeanAveragePrecision().to(device)
     mean_ap.update(outputs, labels)
     metrics = mean_ap.compute()
 
