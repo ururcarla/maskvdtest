@@ -22,14 +22,17 @@ def parse_args():
     parser.add_argument(
         "--dataset-root",
         type=Path,
-        default=Path("./data1", "vid_data"),
-        help="Root folder that contains split folders such as vid_train / vid_val.",
+        default=Path("./data1", "kitti_tracking"),
+        help=(
+            "KITTI tracking 根目录（包含 annotations/tracking_<split>.json）。"
+            "若该结构不存在，会自动退回到 <root>/<split>/labels.json。"
+        ),
     )
     parser.add_argument(
         "--split",
         type=str,
-        default="vid_val",
-        help="Dataset split to process (e.g. vid_train, vid_val).",
+        default="train_half",
+        help="KITTI split，例如 train、val、train_half、val_half。",
     )
     parser.add_argument(
         "--reference-height",
@@ -176,11 +179,24 @@ def render_heatmap(heatmap: np.ndarray, region_scores: np.ndarray, fig_path: Pat
     plt.close()
 
 
+def locate_annotation_file(dataset_root: Path, split: str) -> Path:
+    candidates = [
+        dataset_root / "annotations" / f"tracking_{split}.json",
+        dataset_root / "annotations" / f"{split}.json",
+        dataset_root / split / "labels.json",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(
+        f"无法在 {dataset_root} 下找到 split='{split}' 对应的标注文件，"
+        "请确认已运行 util/convert_kittitrack_to_coco.py 并生成 tracking_<split>.json。"
+    )
+
+
 def main():
     args = parse_args()
-    labels_path = args.dataset_root / args.split / "labels.json"
-    if not labels_path.exists():
-        raise FileNotFoundError(f"未找到标注文件: {labels_path}")
+    labels_path = locate_annotation_file(args.dataset_root, args.split)
 
     with labels_path.open("r") as fp:
         json_data = json.load(fp)
