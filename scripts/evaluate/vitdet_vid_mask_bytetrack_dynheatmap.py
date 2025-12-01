@@ -290,7 +290,7 @@ def val_pass(device, model, data, config, output_file):
     )
     mask_index_static_device = mask_index_static.to(device)
     dynamic_window = int(config.get("dynamic_heatmap_window", 30))
-    dynamic_min_frames = int(config.get("dynamic_heatmap_min_frames", max(1, min(dynamic_window, 3))))
+    dynamic_min_frames = int(config.get("dynamic_heatmap_min_frames", max(1, min(dynamic_window, 30))))
     dynamic_min_activity = float(config.get("dynamic_heatmap_min_activity", 0.0))
     mask_margin = int(config.get("tracker_mask_margin", config.get("margin", 0)))
 
@@ -346,7 +346,7 @@ def val_pass(device, model, data, config, output_file):
                     outputs.append(detections_to_result_dict(tracked, device))
                 heatmap_state.update(results[0]["boxes"])
                 heatmap_mask = heatmap_state.build_mask_index(
-                    keep_ratio=config["sparsity"],
+                    keep_ratio=1-config["sparsity"],
                     min_ready_frames=dynamic_min_frames,
                     min_activity=dynamic_min_activity,
                 )
