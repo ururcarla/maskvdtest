@@ -196,7 +196,7 @@ def val_pass(device, model, data, config, output_file):
     tracker_cfg = config.get("tracker", {})
     tracker = sv.ByteTrack(
         track_activation_threshold=tracker_cfg.get(
-            "track_activation_threshold", 0.25
+            "track_activation_threshold", 0.5
         ),
         lost_track_buffer=tracker_cfg.get("lost_track_buffer", 30),
         minimum_matching_threshold=tracker_cfg.get(
