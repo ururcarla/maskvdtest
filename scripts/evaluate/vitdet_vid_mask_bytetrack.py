@@ -32,6 +32,7 @@ from torchprofile import profile_macs
 import numpy as np
 from utils.image import pad_to_size, rescale
 import supervision as sv
+from supervision.tracker.byte_tracker.single_object_track import STrack
 
 
 def collate_fn(batch):
@@ -128,6 +129,79 @@ def detections_to_result_dict(detections, device):
     return result
 
     
+def update_track_metadata(tracked, metadata):
+    if tracked is None or getattr(tracked, "tracker_id", None) is None:
+        return
+    tracker_ids = tracked.tracker_id
+    if tracker_ids is None or len(tracker_ids) == 0:
+        return
+    confidences = tracked.confidence
+    class_ids = tracked.class_id
+    for idx, tracker_id in enumerate(tracker_ids):
+        if tracker_id == -1:
+            continue
+        score = 1.0
+        if confidences is not None and len(confidences) > idx:
+            score = float(confidences[idx])
+        cls_id = 0
+        if class_ids is not None and len(class_ids) > idx:
+            cls_id = int(class_ids[idx])
+        metadata[int(tracker_id)] = {"class_id": cls_id, "score": score}
+
+
+def tracker_predict_detections(tracker, metadata, default_class_id=0):
+    tracked_tracks = getattr(tracker, "tracked_tracks", [])
+    if not tracked_tracks:
+        detections = sv.Detections.empty()
+        detections.confidence = np.empty((0,), dtype=np.float32)
+        detections.class_id = np.empty((0,), dtype=np.int64)
+        detections.tracker_id = np.empty((0,), dtype=np.int64)
+        return detections
+
+    invalid_id = tracker.external_id_counter.NO_ID
+    active_tracks = [
+        track
+        for track in tracked_tracks
+        if track.is_activated and track.external_track_id != invalid_id
+    ]
+
+    if len(active_tracks) == 0:
+        detections = sv.Detections.empty()
+        detections.confidence = np.empty((0,), dtype=np.float32)
+        detections.class_id = np.empty((0,), dtype=np.int64)
+        detections.tracker_id = np.empty((0,), dtype=np.int64)
+        return detections
+
+    tracker.frame_id += 1
+    STrack.multi_predict(active_tracks, tracker.shared_kalman)
+
+    boxes = []
+    confidences = []
+    class_ids = []
+    tracker_ids = []
+    for track in active_tracks:
+        tracker_id = int(track.external_track_id)
+        boxes.append(track.tlbr)
+        tracker_ids.append(tracker_id)
+        meta = metadata.get(tracker_id)
+        if meta is not None:
+            class_ids.append(int(meta.get("class_id", default_class_id)))
+            confidences.append(float(meta.get("score", 1.0)))
+        else:
+            class_ids.append(default_class_id)
+            track_score = getattr(track, "score", None)
+            confidences.append(float(track_score) if track_score is not None else 1.0)
+        track.frame_id = tracker.frame_id
+
+    detections = sv.Detections(
+        xyxy=np.asarray(boxes, dtype=np.float32),
+        confidence=np.asarray(confidences, dtype=np.float32),
+        class_id=np.asarray(class_ids, dtype=np.int64),
+    )
+    detections.tracker_id = np.asarray(tracker_ids, dtype=np.int64)
+    return detections
+
+
 def val_pass(device, model, data, config, output_file):
     model.counting()
     model.clear_counts()
@@ -142,6 +216,8 @@ def val_pass(device, model, data, config, output_file):
     memory = 0
     n_items = config.get("n_items", len(data))
     count = 0
+    model_frame_count = 0
+    MB = 1024 * 1024
 
     img_shape = config["model"]["input_shape"][-2:]    
 
@@ -178,6 +254,7 @@ def val_pass(device, model, data, config, output_file):
         n_frames += len(vid_item)
         model.reset()
         tracker.reset()
+        track_metadata = {}
         for frame, annotations in vid_item:
             with torch.inference_mode():
                 is_key_frame = (step % config["period"]) == 0
@@ -191,41 +268,45 @@ def val_pass(device, model, data, config, output_file):
                     torch.cuda.synchronize()
                     curr_time = starter.elapsed_time(ender)
                     detections = results_to_supervision_detections(results[0])
+                    tracker_start = perf_counter()
+                    tracked = tracker.update_with_detections(detections)
+                    tracker_latency += (perf_counter() - tracker_start) * 1000
+                    outputs.extend(results)
+                    update_track_metadata(tracked, track_metadata)
+                    model_frame_count += 1
+                    memory += torch.cuda.max_memory_allocated() / MB
                 else:
                     sparsity = 1
                     curr_time = 0.0
-                    detections = sv.Detections.empty()
-                tracker_start = perf_counter()
-                tracked = tracker.update_with_detections(detections)
-                tracker_latency += (perf_counter() - tracker_start) * 1000
-                system_latency += (perf_counter() - system_start) * 1000
-                if is_key_frame:
-                    outputs.extend(results)
-                else:
+                    tracker_start = perf_counter()
+                    tracked = tracker_predict_detections(tracker, track_metadata)
+                    tracker_latency += (perf_counter() - tracker_start) * 1000
                     outputs.append(detections_to_result_dict(tracked, device))
+                system_latency += (perf_counter() - system_start) * 1000
                 step += 1
                 count += 1
                 total_sparsity += sparsity
                 model_latency += curr_time
-                MB = 1024 * 1024
-                memory += torch.cuda.max_memory_allocated() / MB
 
             # labels.append(squeeze_dict(dict_to_device(annotations, device), dim=0))
             labels.extend([dict_to_device(annotation, device) for annotation in annotations])
 
     counts = model.total_counts() / n_frames
 
-    tee_print(f'Sparsity: {total_sparsity / count}', output_file)
-    tee_print(f'Model latency (GPU): {model_latency / count} ms', output_file)
-    tee_print(f'System latency: {system_latency / count} ms', output_file)
-    tee_print(f'Tracker latency: {tracker_latency / count} ms', output_file)
-    tee_print(f'Memory: {memory / count} MB', output_file)
+    total_frames = max(count, 1)
+    model_frames = max(model_frame_count, 1)
+    avg_sparsity = total_sparsity / total_frames
+    tee_print(f'Sparsity: {avg_sparsity}', output_file)
+    tee_print(f'Model latency (GPU): {model_latency / model_frames} ms', output_file)
+    tee_print(f'System latency: {system_latency / total_frames} ms', output_file)
+    tee_print(f'Tracker latency: {tracker_latency / total_frames} ms', output_file)
+    tee_print(f'Memory: {memory / model_frames} MB', output_file)
     if config["model"]["backbone_config"]["backbone"] == "windowed":
         tee_print(f'GFLOPs: {sum([value for _, value in counts.items()]) / 1e9}', output_file)
     # MeanAveragePrecision is extremely slow. It seems fastest to call
     # update() and compute() just once, after all predictions are done.
     else:
-        mask_index_test, _ = model.get_region_mask_static(region_sparsity=1 - total_sparsity/count) # sparsity is keep rate
+        mask_index_test, _ = model.get_region_mask_static(region_sparsity=1 - avg_sparsity) # sparsity is keep rate
         _, x = model.pre_backbone(frame.to(device))
         macs = profile_macs(model.backbone, (x, None, 12, mask_index_test))
         tee_print(f'GFLOPs (torchprofile): {macs / 1e9}', output_file)
