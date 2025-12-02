@@ -192,7 +192,7 @@ def val_pass(device, model, data, config, output_file):
                     curr_time = starter.elapsed_time(ender)
                     detections = results_to_supervision_detections(results[0])
                 else:
-                    sparsity = 0
+                    sparsity = 1
                     curr_time = 0.0
                     detections = sv.Detections.empty()
                 tracker_start = perf_counter()
