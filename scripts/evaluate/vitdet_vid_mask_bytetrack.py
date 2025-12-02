@@ -157,12 +157,6 @@ def val_pass(device, model, data, config, output_file):
             results, _ = model(frame.to(device))
     model.clear_counts()
     # -------------------------------------------------------------------------
-    short_edge_length = vid_item.dataset.combined_transform.short_edge_length
-    max_size = vid_item.dataset.combined_transform.max_size
-    mask_index_static = get_region_mask_static(short_edge_length=short_edge_length,
-                                               max_size=max_size,
-                                               region_sparsity=1 - config["sparsity"]) # sparsity is keep rate 
-
     tracker_cfg = config.get("tracker", {})
     tracker = sv.ByteTrack(
         track_activation_threshold=tracker_cfg.get(
@@ -177,11 +171,6 @@ def val_pass(device, model, data, config, output_file):
             "minimum_consecutive_frames", 1
         ),
     )
-    region_size = config.get("region_size", 16)
-    total_region_tokens = (
-        (img_shape[0] // region_size) * (img_shape[1] // region_size)
-    )
-    mask_index_static_device = mask_index_static.to(device)
 
     for _, vid_item in tqdm(zip(range(n_items), data), total=n_items, ncols=0):
         vid_item = DataLoader(vid_item, batch_size=1, collate_fn=collate_fn)
@@ -192,26 +181,20 @@ def val_pass(device, model, data, config, output_file):
         for frame, annotations in vid_item:
             with torch.inference_mode():
                 is_key_frame = (step % config["period"]) == 0
+                system_start = perf_counter()
                 if is_key_frame:
                     mask_index = None
                     sparsity = 0
+                    starter.record()
+                    results, _ = model(frame.to(device), mask_index)
+                    ender.record()
+                    torch.cuda.synchronize()
+                    curr_time = starter.elapsed_time(ender)
+                    detections = results_to_supervision_detections(results[0])
                 else:
-                    if config["sparsity"] < 1.0:
-                        mask_index = mask_index_static_device
-                        keep_rate = mask_index.shape[1] / total_region_tokens
-                        sparsity = 1 - keep_rate
-                    else:
-                        mask_index = None
-                        sparsity = 0
-               
-                system_start = perf_counter()
-                starter.record()
-                results, _ = model(frame.to(device), mask_index)
-                ender.record()
-                torch.cuda.synchronize()
-                curr_time = starter.elapsed_time(ender)
-
-                detections = results_to_supervision_detections(results[0])
+                    sparsity = 0
+                    curr_time = 0.0
+                    detections = sv.Detections.empty()
                 tracker_start = perf_counter()
                 tracked = tracker.update_with_detections(detections)
                 tracker_latency += (perf_counter() - tracker_start) * 1000
