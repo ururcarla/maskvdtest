@@ -16,7 +16,7 @@ from datasets.vid import VIDResize, VID
 from models.vitdet import ViTDet
 from utils.config import initialize_run
 from utils.evaluate import run_evaluations
-from utils.misc import dict_to_device, squeeze_dict, get_pytorch_device
+from utils.misc import dict_to_device, squeeze_dict, get_pytorch_device, compute_detection_recall
 from torch import optim
 from datetime import datetime
 from time import perf_counter
@@ -314,9 +314,11 @@ def val_pass(device, model, data, config, output_file):
     mean_ap = MeanAveragePrecision().to(device)
     mean_ap.update(outputs, labels)
     metrics = mean_ap.compute()
+    recall_threshold = config.get("recall_iou_threshold", 0.5)
+    recall_metrics = compute_detection_recall(outputs, labels, recall_threshold)
 
     model.clear_counts()
-    return {"metrics": metrics, "counts": counts}
+    return {"metrics": metrics, "recall": recall_metrics, "counts": counts}
 
 
 

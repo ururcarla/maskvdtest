@@ -20,7 +20,7 @@ from util.lr_sched import LR_Scheduler
 from datetime import datetime
 from torch import optim
 from torch.utils.tensorboard import SummaryWriter
-from utils.misc import dict_to_device, squeeze_dict, get_pytorch_device, set_policies
+from utils.misc import dict_to_device, squeeze_dict, get_pytorch_device, set_policies, compute_detection_recall
 from backbones.policies import TokenNormTopK
 import torch.nn.functional as F
 import numpy as np
@@ -157,8 +157,10 @@ def val_pass(device, model, data, config, output_file):
     mean_ap = MeanAveragePrecision()
     mean_ap.update(outputs, labels)
     metrics = mean_ap.compute()
+    recall_threshold = config.get("recall_iou_threshold", 0.5)
+    recall_metrics = compute_detection_recall(outputs, labels, recall_threshold)
     model.clear_counts()
-    return {"metrics": metrics, "counts": counts}
+    return {"metrics": metrics, "recall": recall_metrics, "counts": counts}
 
 
 def main():

@@ -15,7 +15,7 @@ from datasets.vid import VIDResize, VID
 from models.vitdet import ViTDet
 from utils.config import initialize_run
 from utils.evaluate import run_evaluations
-from utils.misc import dict_to_device, squeeze_dict
+from utils.misc import dict_to_device, squeeze_dict, compute_detection_recall
 
 
 def evaluate_vitdet_metrics(device, model, data, config):
@@ -63,9 +63,11 @@ def evaluate_vitdet_metrics(device, model, data, config):
     mean_ap = MeanAveragePrecision()
     mean_ap.update(outputs, labels)
     metrics = mean_ap.compute()
+    recall_threshold = config.get("recall_iou_threshold", 0.5)
+    recall_metrics = compute_detection_recall(outputs, labels, recall_threshold)
     counts = model.total_counts() / n_frames
     model.clear_counts()
-    return {"metrics": metrics, "counts": counts}
+    return {"metrics": metrics, "recall": recall_metrics, "counts": counts}
 
 def main():
     config = initialize_run(config_location=Path("configs", "evaluate", "vitdet_vid"))

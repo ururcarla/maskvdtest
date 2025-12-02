@@ -16,7 +16,7 @@ from datasets.vid import VIDResize, VID
 from models.vitdet import ViTDet
 from utils.config import initialize_run
 from utils.evaluate import run_evaluations
-from utils.misc import dict_to_device, squeeze_dict, tee_print
+from utils.misc import dict_to_device, squeeze_dict, tee_print, compute_detection_recall
 
 def collate_fn(batch):
     batch = list(zip(*batch))
@@ -79,10 +79,12 @@ def evaluate_vitdet_metrics(device, model, data, config, output_file):
     mean_ap = MeanAveragePrecision()
     mean_ap.update(outputs, labels)
     metrics = mean_ap.compute()
+    recall_threshold = config.get("recall_iou_threshold", 0.5)
+    recall_metrics = compute_detection_recall(outputs, labels, recall_threshold)
 
     counts = model.total_counts() / n_frames
     model.clear_counts()
-    return {"metrics": metrics, "counts": counts}
+    return {"metrics": metrics, "recall": recall_metrics, "counts": counts}
 
 
 def main():
