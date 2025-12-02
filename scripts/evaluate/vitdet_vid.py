@@ -89,9 +89,9 @@ def main():
     config = initialize_run(config_location=Path("configs", "evaluate", "vitdet_vid"))
     long_edge = max(config["model"]["input_shape"][-2:])
     data = VID(
-        Path("/data1", "vid_data"),
+        Path("./data1", "vid_data"),
         split=config["split"],
-        tar_path=Path("/data1", "vid_data.tar"),
+        tar_path=Path("./data1", "vid_data.tar"),
         combined_transform=VIDResize(
             short_edge_length=640 * long_edge // 1024, max_size=long_edge
         ),
