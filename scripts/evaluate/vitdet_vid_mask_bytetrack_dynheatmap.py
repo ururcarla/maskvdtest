@@ -85,12 +85,13 @@ def get_region_mask_static(short_edge_length, max_size, region_size=16, region_s
 class SlidingWindowHeatmap:
     """Maintains a per-region heatmap with a sliding window of recent frames."""
 
-    def __init__(self, image_shape, region_size, window_size):
+    def __init__(self, image_shape, region_size, window_size, score_threshold=0.75):
         self.image_shape = image_shape
         self.region_size = max(1, int(region_size))
         self.grid_height = max(1, image_shape[0] // self.region_size)
         self.grid_width = max(1, image_shape[1] // self.region_size)
         self.window_size = max(1, int(window_size))
+        self.score_threshold = 0.0 if score_threshold is None else max(0.0, float(score_threshold))
         self.accumulator = torch.zeros((1, 1, self.grid_height, self.grid_width), dtype=torch.float32)
         self.history = deque()
         self.total_activity = 0.0
@@ -98,13 +99,21 @@ class SlidingWindowHeatmap:
     def _empty_map(self):
         return torch.zeros_like(self.accumulator)
 
-    def _boxes_to_grid(self, boxes):
+    def _boxes_to_grid(self, boxes, scores=None):
         grid = self._empty_map()
         if boxes is None or boxes.numel() == 0:
             return grid
         boxes_cpu = boxes.detach().cpu().numpy()
+        use_scores = (
+            scores is not None
+            and torch.is_tensor(scores)
+            and scores.numel() == boxes.shape[0]
+        )
+        scores_cpu = scores.detach().cpu().numpy() if use_scores else None
         height, width = self.image_shape
-        for x1, y1, x2, y2 in boxes_cpu:
+        for idx, (x1, y1, x2, y2) in enumerate(boxes_cpu):
+            if use_scores and scores_cpu[idx] <= self.score_threshold:
+                continue
             if x2 <= x1 or y2 <= y1:
                 continue
             x1 = float(max(0.0, min(x1, width)))
@@ -132,8 +141,11 @@ class SlidingWindowHeatmap:
             self.accumulator -= removed
         self.total_activity = float(self.accumulator.sum().item())
 
-    def update(self, boxes):
-        region_map = self._boxes_to_grid(boxes) if boxes is not None else self._empty_map()
+    def update(self, boxes, scores=None):
+        if boxes is None or boxes.numel() == 0:
+            region_map = self._empty_map()
+        else:
+            region_map = self._boxes_to_grid(boxes, scores)
         self._push_map(region_map)
 
     def build_mask_index(self, keep_ratio, min_ready_frames=1, min_activity=0.0):
@@ -292,6 +304,7 @@ def val_pass(device, model, data, config, output_file):
     dynamic_window = int(config.get("dynamic_heatmap_window", 30))
     dynamic_min_frames = int(config.get("dynamic_heatmap_min_frames", max(1, min(dynamic_window, 30))))
     dynamic_min_activity = float(config.get("dynamic_heatmap_min_activity", 0.0))
+    dynamic_score_threshold = float(config.get("dynamic_heatmap_score_threshold", 0.75))
     mask_margin = int(config.get("tracker_mask_margin", config.get("margin", 0)))
 
     for _, vid_item in tqdm(zip(range(n_items), data), total=n_items, ncols=0):
@@ -304,6 +317,7 @@ def val_pass(device, model, data, config, output_file):
             image_shape=tuple(img_shape),
             region_size=region_size,
             window_size=dynamic_window,
+            score_threshold=dynamic_score_threshold,
         )
         heatmap_mask_cache = None
         tracker_mask_cache = None
@@ -344,7 +358,11 @@ def val_pass(device, model, data, config, output_file):
                     outputs.extend(results)
                 else:
                     outputs.append(detections_to_result_dict(tracked, device))
-                heatmap_state.update(results[0]["boxes"])
+                frame_results = results[0]
+                heatmap_state.update(
+                    frame_results["boxes"],
+                    frame_results.get("scores"),
+                )
                 heatmap_mask = heatmap_state.build_mask_index(
                     keep_ratio=1-config["sparsity"],
                     min_ready_frames=dynamic_min_frames,
