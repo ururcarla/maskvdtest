@@ -194,6 +194,10 @@ def val_pass(device, model, data, config, output_file):
                                                region_sparsity=1 - config["sparsity"]) # sparsity is keep rate 
 
     tracker_cfg = config.get("tracker", {})
+    tracker_input_threshold = tracker_cfg.get(
+        "input_score_threshold",
+        tracker_cfg.get("track_activation_threshold", 0.5),
+    )
     tracker = sv.ByteTrack(
         track_activation_threshold=tracker_cfg.get(
             "track_activation_threshold", 0.5
@@ -249,6 +253,12 @@ def val_pass(device, model, data, config, output_file):
                 curr_time = starter.elapsed_time(ender)
 
                 detections = results_to_supervision_detections(results[0])
+                if (
+                    tracker_input_threshold is not None
+                    and len(detections) > 0
+                ):
+                    keep = detections.confidence > tracker_input_threshold
+                    detections = detections[keep]
                 tracker_start = perf_counter()
                 tracked = tracker.update_with_detections(detections)
                 tracker_latency += (perf_counter() - tracker_start) * 1000
