@@ -528,10 +528,7 @@ def val_pass(device, model, data, config, output_file):
                         )
                         if is_safe and not safe_tracker_only:
                             safe_tracker_only = True
-                            tee_print(
-                                "Safe environment detected. Tracker only until next key frame.",
-                                output_file,
-                            )
+                            # print("Safe environment detected. Tracker only until next key frame.")
 
                     if getattr(tracked, "tracker_id", None) is not None:
                         for idx, tracker_id in enumerate(tracked.tracker_id):
