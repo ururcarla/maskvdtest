@@ -32,6 +32,8 @@ from torchprofile import profile_macs
 import numpy as np
 from utils.image import pad_to_size, rescale
 import supervision as sv
+from supervision.tracker.byte_tracker.single_object_track import STrack
+import math
 
 
 def collate_fn(batch):
@@ -81,22 +83,41 @@ def get_region_mask_static(short_edge_length, max_size, region_size=16, region_s
     return index
 
 
-def get_region_mask_dynamic(results, image_shape, conf_threshold=0.5, region_size=16, margin=0):
+def detach_results_for_mask(results):
     if results is None:
+        return None
+    detached = []
+    for result in results:
+        detached.append(
+            {
+                key: value.detach().cpu() if torch.is_tensor(value) else value
+                for key, value in result.items()
+            }
+        )
+    return detached
+
+
+def get_region_mask_from_results(
+    prev_results,
+    image_shape,
+    conf_threshold=0.5,
+    region_size=16,
+    margin=0,
+):
+    if not prev_results:
         return None
 
     height, width = image_shape
     mask = torch.zeros((height, width), dtype=torch.float32)
-    margin = int(max(margin, 0))
-    has_bbox = False
+    margin = max(int(margin), 0)
+    has_box = False
 
-    for result in results:
+    for result in prev_results:
         boxes = result["boxes"].detach().cpu()
         scores = result["scores"].detach().cpu()
-        for bbox, score in zip(boxes, scores):
-            if score <= conf_threshold:
+        for idx, bbox in enumerate(boxes):
+            if scores[idx] < conf_threshold:
                 continue
-            has_bbox = True
             x1, y1, x2, y2 = bbox.tolist()
             x1 = max(0, int(np.floor(x1)) - margin)
             y1 = max(0, int(np.floor(y1)) - margin)
@@ -105,8 +126,9 @@ def get_region_mask_dynamic(results, image_shape, conf_threshold=0.5, region_siz
             if x2 <= x1 or y2 <= y1:
                 continue
             mask[y1:y2, x1:x2] = 1
+            has_box = True
 
-    if not has_bbox or torch.count_nonzero(mask) == 0:
+    if not has_box:
         return None
 
     weight = torch.ones(1, 1, region_size, region_size)
@@ -114,7 +136,7 @@ def get_region_mask_dynamic(results, image_shape, conf_threshold=0.5, region_siz
     mask_index = torch.nonzero(y.flatten() > 0)
     if mask_index.numel() == 0:
         return None
-    return mask_index.reshape(1, -1), y.numel()
+    return mask_index.reshape(1, -1)
 
 
 def results_to_supervision_detections(result):
@@ -163,193 +185,188 @@ def detections_to_result_dict(detections, device):
         result["track_ids"] = tracker_ids
     return result
 
-
-def tracks_to_detections(tracks, track_metadata):
-    boxes, scores, class_ids, tracker_ids = [], [], [], []
-    for track in tracks:
-        if not getattr(track, "is_activated", False):
+    
+def update_track_metadata(tracked, metadata):
+    if tracked is None or getattr(tracked, "tracker_id", None) is None:
+        return
+    tracker_ids = tracked.tracker_id
+    if tracker_ids is None or len(tracker_ids) == 0:
+        return
+    confidences = tracked.confidence
+    class_ids = tracked.class_id
+    for idx, tracker_id in enumerate(tracker_ids):
+        if tracker_id == -1:
             continue
-        track_id = getattr(track, "external_track_id", -1)
-        if track_id is None or track_id < 0:
-            continue
-        boxes.append(track.tlbr)
-        metadata = track_metadata.get(int(track_id), {})
-        scores.append(float(metadata.get("score", getattr(track, "score", 1.0))))
-        class_ids.append(int(metadata.get("class_id", 0)))
-        tracker_ids.append(int(track_id))
+        score = 1.0
+        if confidences is not None and len(confidences) > idx:
+            score = float(confidences[idx])
+        cls_id = 0
+        if class_ids is not None and len(class_ids) > idx:
+            cls_id = int(class_ids[idx])
+        metadata[int(tracker_id)] = {"class_id": cls_id, "score": score}
 
-    if not boxes:
+
+def tracker_predict_detections(tracker, metadata, default_class_id=0):
+    tracked_tracks = getattr(tracker, "tracked_tracks", [])
+    if not tracked_tracks:
         detections = sv.Detections.empty()
         detections.confidence = np.empty((0,), dtype=np.float32)
         detections.class_id = np.empty((0,), dtype=np.int64)
         detections.tracker_id = np.empty((0,), dtype=np.int64)
         return detections
 
+    invalid_id = tracker.external_id_counter.NO_ID
+    active_tracks = [
+        track
+        for track in tracked_tracks
+        if track.is_activated and track.external_track_id != invalid_id
+    ]
+
+    if len(active_tracks) == 0:
+        detections = sv.Detections.empty()
+        detections.confidence = np.empty((0,), dtype=np.float32)
+        detections.class_id = np.empty((0,), dtype=np.int64)
+        detections.tracker_id = np.empty((0,), dtype=np.int64)
+        return detections
+
+    tracker.frame_id += 1
+    STrack.multi_predict(active_tracks, tracker.shared_kalman)
+
+    boxes = []
+    confidences = []
+    class_ids = []
+    tracker_ids = []
+    for track in active_tracks:
+        tracker_id = int(track.external_track_id)
+        boxes.append(track.tlbr)
+        tracker_ids.append(tracker_id)
+        meta = metadata.get(tracker_id)
+        if meta is not None:
+            class_ids.append(int(meta.get("class_id", default_class_id)))
+            confidences.append(float(meta.get("score", 1.0)))
+        else:
+            class_ids.append(default_class_id)
+            track_score = getattr(track, "score", None)
+            confidences.append(float(track_score) if track_score is not None else 1.0)
+        track.frame_id = tracker.frame_id
+
     detections = sv.Detections(
         xyxy=np.asarray(boxes, dtype=np.float32),
-        confidence=np.asarray(scores, dtype=np.float32),
+        confidence=np.asarray(confidences, dtype=np.float32),
         class_id=np.asarray(class_ids, dtype=np.int64),
     )
     detections.tracker_id = np.asarray(tracker_ids, dtype=np.int64)
     return detections
 
 
-def update_tracker_metadata(track_metadata, detections):
-    if detections is None or len(detections) == 0:
-        return
-    tracker_ids = getattr(detections, "tracker_id", None)
-    if tracker_ids is None:
-        return
-    conf = detections.confidence
-    cls = detections.class_id
-    for idx, tracker_id in enumerate(tracker_ids):
-        track_metadata[int(tracker_id)] = {
-            "score": float(conf[idx]) if conf is not None else 1.0,
-            "class_id": int(cls[idx]) if cls is not None else 0,
-        }
-
-
-def tracker_step_without_detections(tracker, track_metadata):
-    empty = np.zeros((0, 5), dtype=np.float32)
-    tracks = tracker.update_with_tensors(empty)
-    return tracks_to_detections(tracks, track_metadata)
-
-
-def simulate_tracker_prediction(tracker, track_metadata):
-    tracker_clone = copy.deepcopy(tracker)
-    return tracker_step_without_detections(tracker_clone, track_metadata)
-
-
 def compute_iou_matrix(boxes_a, boxes_b):
-    if len(boxes_a) == 0 or len(boxes_b) == 0:
-        return np.zeros((len(boxes_a), len(boxes_b)), dtype=np.float32)
-
-    boxes_a = np.asarray(boxes_a, dtype=np.float32)
-    boxes_b = np.asarray(boxes_b, dtype=np.float32)
-
-    a = boxes_a[:, None, :]
-    b = boxes_b[None, :, :]
-
-    inter_x1 = np.maximum(a[..., 0], b[..., 0])
-    inter_y1 = np.maximum(a[..., 1], b[..., 1])
-    inter_x2 = np.minimum(a[..., 2], b[..., 2])
-    inter_y2 = np.minimum(a[..., 3], b[..., 3])
-
-    inter_w = np.clip(inter_x2 - inter_x1, a_min=0, a_max=None)
-    inter_h = np.clip(inter_y2 - inter_y1, a_min=0, a_max=None)
-    inter_area = inter_w * inter_h
-
-    area_a = (boxes_a[:, 2] - boxes_a[:, 0]) * (boxes_a[:, 3] - boxes_a[:, 1])
-    area_b = (boxes_b[:, 2] - boxes_b[:, 0]) * (boxes_b[:, 3] - boxes_b[:, 1])
-    union = area_a[:, None] + area_b[None, :] - inter_area
-    union = np.clip(union, a_min=1e-6, a_max=None)
-    return inter_area / union
+    if boxes_a.shape[0] == 0 or boxes_b.shape[0] == 0:
+        return torch.zeros((boxes_a.shape[0], boxes_b.shape[0]), dtype=torch.float32)
+    a = torch.as_tensor(boxes_a, dtype=torch.float32)
+    b = torch.as_tensor(boxes_b, dtype=torch.float32)
+    lt = torch.max(a[:, None, :2], b[None, :, :2])
+    rb = torch.min(a[:, None, 2:], b[None, :, 2:])
+    wh = (rb - lt).clamp(min=0)
+    inter = wh[:, :, 0] * wh[:, :, 1]
+    area_a = (a[:, 2] - a[:, 0]) * (a[:, 3] - a[:, 1])
+    area_b = (b[:, 2] - b[:, 0]) * (b[:, 3] - b[:, 1])
+    union = area_a[:, None] + area_b[None, :] - inter
+    return inter / (union + 1e-6)
 
 
 def greedy_match(iou_matrix, threshold):
-    if iou_matrix.size == 0:
-        return []
-    matrix = iou_matrix.copy()
     matches = []
+    if iou_matrix.numel() == 0:
+        return matches
+    matrix = iou_matrix.clone()
     while True:
-        max_index = np.unravel_index(np.argmax(matrix), matrix.shape)
-        max_value = matrix[max_index]
-        if max_value < threshold:
+        max_val = torch.max(matrix)
+        if max_val < threshold:
             break
-        matches.append((max_index[0], max_index[1], float(max_value)))
-        matrix[max_index[0], :] = -1
-        matrix[:, max_index[1]] = -1
+        flat_idx = torch.argmax(matrix)
+        num_cols = matrix.shape[1]
+        pred_idx = flat_idx // num_cols
+        det_idx = flat_idx % num_cols
+        matches.append((pred_idx.item(), det_idx.item(), max_val.item()))
+        matrix[pred_idx, :] = -1
+        matrix[:, det_idx] = -1
     return matches
 
 
-def evaluate_safe_environment(predicted, actual, thresholds):
-    cfg = {
-        "iou_threshold": thresholds.get("iou_threshold", 0.8),
-        "speed_threshold": thresholds.get("speed_threshold", 0.05),
-        "unmatched_threshold": thresholds.get("unmatched_threshold", 0.1),
-        "match_iou_threshold": thresholds.get(
-            "match_iou_threshold", thresholds.get("iou_threshold", 0.8)
-        ),
-    }
+def compute_speed_delta(prev_box, pred_box, det_box):
+    def center(box):
+        return ((box[0] + box[2]) * 0.5, (box[1] + box[3]) * 0.5)
 
-    num_pred = len(predicted)
-    num_actual = len(actual)
-    metrics = {
-        "avg_iou": 0.0,
-        "avg_speed_change": 0.0,
-        "new_detection_rate": 1.0 if num_actual > 0 else 0.0,
-        "missing_track_rate": 1.0 if num_pred > 0 else 0.0,
-        "num_pred": num_pred,
-        "num_actual": num_actual,
-        "matched_pairs": 0,
-        "is_safe": False,
-    }
+    prev_center = center(prev_box)
+    pred_center = center(pred_box)
+    det_center = center(det_box)
+    pred_speed = (pred_center[0] - prev_center[0], pred_center[1] - prev_center[1])
+    det_speed = (det_center[0] - prev_center[0], det_center[1] - prev_center[1])
+    diff = (pred_speed[0] - det_speed[0], pred_speed[1] - det_speed[1])
+    return math.sqrt(diff[0] ** 2 + diff[1] ** 2)
 
-    if num_pred == 0 and num_actual == 0:
-        metrics.update(
-            {
-                "avg_iou": 1.0,
-                "avg_speed_change": 0.0,
-                "new_detection_rate": 0.0,
-                "missing_track_rate": 0.0,
-                "matched_pairs": 0,
-                "is_safe": True,
-            }
-        )
-        return metrics
 
-    if num_pred == 0 or num_actual == 0:
-        return metrics
+def evaluate_safety_environment(predicted, detections, prev_track_boxes, safety_cfg):
+    metrics = {}
+    if predicted is None or len(predicted) == 0 or len(detections) == 0:
+        metrics["reason"] = "insufficient_inputs"
+        return False, metrics
 
-    iou_matrix = compute_iou_matrix(predicted.xyxy, actual.xyxy)
-    matches = greedy_match(iou_matrix, cfg["match_iou_threshold"])
-    metrics["matched_pairs"] = len(matches)
+    pred_boxes = predicted.xyxy
+    det_boxes = detections.xyxy
+    iou_matrix = compute_iou_matrix(pred_boxes, det_boxes)
+    matching_iou_threshold = safety_cfg.get("matching_iou_threshold", 0.5)
+    matches = greedy_match(iou_matrix, matching_iou_threshold)
+    if len(matches) == 0:
+        metrics["reason"] = "no_matches"
+        return False, metrics
 
-    if not matches:
-        return metrics
+    avg_iou = float(np.mean([match[2] for match in matches]))
+    detection_gap = (len(det_boxes) - len(matches)) / max(1, len(det_boxes))
+    track_gap = (len(pred_boxes) - len(matches)) / max(1, len(pred_boxes))
 
-    matched_ious = [match[2] for match in matches]
-    metrics["avg_iou"] = float(np.mean(matched_ious))
-
-    speed_changes = []
-    for pred_idx, actual_idx, _ in matches:
-        pred_box = predicted.xyxy[pred_idx]
-        actual_box = actual.xyxy[actual_idx]
-        pred_center = np.array(
-            [(pred_box[0] + pred_box[2]) * 0.5, (pred_box[1] + pred_box[3]) * 0.5],
-            dtype=np.float32,
-        )
-        actual_center = np.array(
-            [
-                (actual_box[0] + actual_box[2]) * 0.5,
-                (actual_box[1] + actual_box[3]) * 0.5,
-            ],
-            dtype=np.float32,
-        )
-        diag = np.sqrt(
-            max(
-                (actual_box[2] - actual_box[0]) ** 2
-                + (actual_box[3] - actual_box[1]) ** 2,
-                1e-6,
+    speed_diffs = []
+    tracker_ids = getattr(predicted, "tracker_id", None)
+    if tracker_ids is not None:
+        for pred_idx, det_idx, _ in matches:
+            if len(tracker_ids) <= pred_idx:
+                continue
+            tracker_id = int(tracker_ids[pred_idx])
+            prev_box = prev_track_boxes.get(tracker_id)
+            if prev_box is None:
+                continue
+            speed_diffs.append(
+                compute_speed_delta(
+                    prev_box,
+                    pred_boxes[pred_idx],
+                    det_boxes[det_idx],
+                )
             )
-        )
-        center_delta = np.linalg.norm(pred_center - actual_center)
-        speed_changes.append(center_delta / diag)
 
-    metrics["avg_speed_change"] = float(np.mean(speed_changes)) if speed_changes else 0.0
-    metrics["new_detection_rate"] = (
-        (num_actual - len(matches)) / max(1, num_actual)
-    )
-    metrics["missing_track_rate"] = (num_pred - len(matches)) / max(1, num_pred)
+    avg_speed_delta = float(np.mean(speed_diffs)) if speed_diffs else None
 
-    metrics["is_safe"] = (
-        metrics["avg_iou"] >= cfg["iou_threshold"]
-        and metrics["avg_speed_change"] <= cfg["speed_threshold"]
-        and metrics["new_detection_rate"] <= cfg["unmatched_threshold"]
-        and metrics["missing_track_rate"] <= cfg["unmatched_threshold"]
+    metrics.update(
+        {
+            "avg_iou": avg_iou,
+            "detection_gap": detection_gap,
+            "track_gap": track_gap,
+            "avg_speed_delta": avg_speed_delta,
+        }
     )
-    return metrics
-    
+
+    iou_ok = avg_iou >= safety_cfg.get("avg_iou_threshold", 0.8)
+    det_gap_ok = detection_gap <= safety_cfg.get("max_detection_miss_rate", 0.1)
+    track_gap_ok = track_gap <= safety_cfg.get("max_track_miss_rate", 0.1)
+    speed_threshold = safety_cfg.get("speed_change_threshold", 5.0)
+    speed_ok = (
+        avg_speed_delta is not None and avg_speed_delta <= speed_threshold
+    )
+
+    is_safe = iou_ok and det_gap_ok and track_gap_ok and speed_ok
+    metrics["is_safe"] = is_safe
+    return is_safe, metrics
+
+
 def val_pass(device, model, data, config, output_file):
     model.counting()
     model.clear_counts()
@@ -364,6 +381,8 @@ def val_pass(device, model, data, config, output_file):
     memory = 0
     n_items = config.get("n_items", len(data))
     count = 0
+    model_frame_count = 0
+    MB = 1024 * 1024
 
     img_shape = config["model"]["input_shape"][-2:]    
 
@@ -381,17 +400,12 @@ def val_pass(device, model, data, config, output_file):
     # -------------------------------------------------------------------------
     short_edge_length = vid_item.dataset.combined_transform.short_edge_length
     max_size = vid_item.dataset.combined_transform.max_size
-    mask_index_static = get_region_mask_static(
+    mask_index_static_cpu = get_region_mask_static(
         short_edge_length=short_edge_length,
         max_size=max_size,
         region_sparsity=1 - config["sparsity"],
-    )
-
+    )  # sparsity is keep rate
     tracker_cfg = config.get("tracker", {})
-    tracker_input_threshold = tracker_cfg.get(
-        "input_score_threshold",
-        tracker_cfg.get("track_activation_threshold", 0.5),
-    )
     tracker = sv.ByteTrack(
         track_activation_threshold=tracker_cfg.get(
             "track_activation_threshold", 0.5
@@ -409,12 +423,8 @@ def val_pass(device, model, data, config, output_file):
     total_region_tokens = (
         (img_shape[0] // region_size) * (img_shape[1] // region_size)
     )
-    margin = int(config.get("margin", 0))
-    conf_threshold = float(config.get("conf", 0.5))
-
-    safe_cfg = config.get("safe_env", {})
-    safe_enabled = safe_cfg.get("enabled", True)
-    safe_log = safe_cfg.get("log", True)
+    mask_margin = int(config.get("margin", 0))
+    safety_cfg = config.get("safety", {})
 
     for _, vid_item in tqdm(zip(range(n_items), data), total=n_items, ncols=0):
         vid_item = DataLoader(vid_item, batch_size=1, collate_fn=collate_fn)
@@ -423,42 +433,54 @@ def val_pass(device, model, data, config, output_file):
         model.reset()
         tracker.reset()
         track_metadata = {}
-        last_model_results = None
-        safe_skip_active = False
-
+        prev_results_for_mask = None
+        safe_tracker_only = False
+        prev_detection_boxes = {}
         for frame, annotations in vid_item:
             with torch.inference_mode():
                 is_key_frame = (step % config["period"]) == 0
-                if is_key_frame:
-                    safe_skip_active = False
-                run_model = is_key_frame or not safe_skip_active
+                invalid_track_id = tracker.external_id_counter.NO_ID
+                has_active_tracks = any(
+                    track.is_activated and track.external_track_id != invalid_track_id
+                    for track in getattr(tracker, "tracked_tracks", [])
+                )
+                if not has_active_tracks:
+                    safe_tracker_only = False
 
-                mask_index = None
+                run_model = True
+                mask_index_tensor = None
                 sparsity = 0
-                if run_model:
-                    mask_index_cpu = None
-                    dynamic_mask = None
-                    if not is_key_frame and last_model_results is not None:
-                        dynamic_mask = get_region_mask_dynamic(
-                            last_model_results,
-                            image_shape=tuple(img_shape),
-                            conf_threshold=conf_threshold,
-                            region_size=region_size,
-                            margin=margin,
+
+                if is_key_frame:
+                    safe_tracker_only = False
+                else:
+                    if safe_tracker_only and has_active_tracks:
+                        run_model = False
+
+                if run_model and not is_key_frame:
+                    mask_index_cpu = get_region_mask_from_results(
+                        prev_results_for_mask,
+                        image_shape=tuple(img_shape),
+                        conf_threshold=config.get("conf", 0.5),
+                        region_size=region_size,
+                        margin=mask_margin,
+                    )
+                    if mask_index_cpu is not None and config["sparsity"] < 1.0:
+                        mask_index_cpu = (
+                            torch.unique(
+                                torch.cat((mask_index_cpu, mask_index_static_cpu), dim=1)
+                            )
+                            .reshape(1, -1)
                         )
-                    if dynamic_mask is not None:
-                        mask_index_cpu, _ = dynamic_mask
-                        if config["sparsity"] < 1.0:
-                            mask_index_cpu = torch.unique(
-                                torch.cat((mask_index_cpu, mask_index_static), dim=1)
-                            ).reshape(1, -1)
-                    elif config["sparsity"] < 1.0:
-                        mask_index_cpu = mask_index_static
+                    elif mask_index_cpu is None and config["sparsity"] < 1.0:
+                        mask_index_cpu = mask_index_static_cpu
 
                     if mask_index_cpu is not None:
-                        keep_rate = mask_index_cpu.shape[1] / max(1, total_region_tokens)
-                        mask_index = mask_index_cpu.to(device)
+                        keep_rate = mask_index_cpu.shape[1] / total_region_tokens
                         sparsity = 1 - keep_rate
+                        mask_index_tensor = mask_index_cpu.to(device)
+
+                mask_index = mask_index_tensor if run_model else None
 
                 system_start = perf_counter()
                 if run_model:
@@ -467,87 +489,83 @@ def val_pass(device, model, data, config, output_file):
                     ender.record()
                     torch.cuda.synchronize()
                     curr_time = starter.elapsed_time(ender)
-                    model_latency += curr_time
-                    last_model_results = results
 
-                    detections_full = results_to_supervision_detections(results[0])
-                    detections_for_tracker = detections_full
-                    if (
-                        tracker_input_threshold is not None
-                        and len(detections_for_tracker) > 0
-                    ):
-                        keep = (
-                            detections_for_tracker.confidence
-                            > tracker_input_threshold
-                        )
-                        detections_for_tracker = detections_for_tracker[keep]
+                    detections = results_to_supervision_detections(results[0])
 
-                    predicted_safe = None
-                    if is_key_frame and safe_enabled:
-                        predicted_safe = simulate_tracker_prediction(
-                            tracker, track_metadata
-                        )
+                    safety_enabled = safety_cfg.get("enabled", True)
+                    predicted_eval = None
+                    if safety_enabled and has_active_tracks:
+                        try:
+                            tracker_snapshot = copy.deepcopy(tracker)
+                            metadata_snapshot = copy.deepcopy(track_metadata)
+                            predicted_eval = tracker_predict_detections(
+                                tracker_snapshot, metadata_snapshot
+                            )
+                        except Exception:
+                            predicted_eval = None
 
                     tracker_start = perf_counter()
-                    tracked = tracker.update_with_detections(detections_for_tracker)
+                    tracked = tracker.update_with_detections(detections)
                     tracker_latency += (perf_counter() - tracker_start) * 1000
-                    system_latency += (perf_counter() - system_start) * 1000
-                    update_tracker_metadata(track_metadata, tracked)
                     outputs.extend(results)
+                    prev_results_for_mask = detach_results_for_mask(results)
+                    update_track_metadata(tracked, track_metadata)
+                    total_sparsity += sparsity
+                    model_latency += curr_time
+                    memory += torch.cuda.max_memory_allocated() / MB
+                    model_frame_count += 1
 
-                    if is_key_frame and safe_enabled:
-                        safe_metrics = evaluate_safe_environment(
-                            predicted_safe, detections_full, safe_cfg
+                    prev_boxes_snapshot = {
+                        track_id: box.copy() for track_id, box in prev_detection_boxes.items()
+                    }
+
+                    if safety_enabled and predicted_eval is not None:
+                        is_safe, _ = evaluate_safety_environment(
+                            predicted_eval,
+                            detections,
+                            prev_boxes_snapshot,
+                            safety_cfg,
                         )
-                        safe_skip_active = safe_metrics["is_safe"]
-                        if safe_log:
-                            status = "ON" if safe_skip_active else "OFF"
+                        if is_safe and not safe_tracker_only:
+                            safe_tracker_only = True
                             tee_print(
-                                (
-                                    f"[SAFE {status}] IoU={safe_metrics['avg_iou']:.3f} "
-                                    f"Speed={safe_metrics['avg_speed_change']:.3f} "
-                                    f"NewDet={safe_metrics['new_detection_rate']:.3f} "
-                                    f"MissTrack={safe_metrics['missing_track_rate']:.3f}"
-                                ),
+                                "Safe environment detected. Tracker only until next key frame.",
                                 output_file,
                             )
 
-                    step += 1
-                    count += 1
-                    total_sparsity += sparsity
-                    MB = 1024 * 1024
-                    memory += torch.cuda.max_memory_allocated() / MB
+                    if getattr(tracked, "tracker_id", None) is not None:
+                        for idx, tracker_id in enumerate(tracked.tracker_id):
+                            if tracker_id == -1:
+                                continue
+                            prev_detection_boxes[int(tracker_id)] = tracked.xyxy[idx].copy()
                 else:
                     tracker_start = perf_counter()
-                    predicted_detections = tracker_step_without_detections(
-                        tracker, track_metadata
-                    )
+                    tracked = tracker_predict_detections(tracker, track_metadata)
                     tracker_latency += (perf_counter() - tracker_start) * 1000
-                    system_latency += (perf_counter() - system_start) * 1000
-                    outputs.append(
-                        detections_to_result_dict(predicted_detections, device)
-                    )
-                    step += 1
-                    count += 1
-                    total_sparsity += sparsity
+                    outputs.append(detections_to_result_dict(tracked, device))
+                system_latency += (perf_counter() - system_start) * 1000
 
-            labels.extend(
-                [dict_to_device(annotation, device) for annotation in annotations]
-            )
+                step += 1
+                count += 1
+
+            labels.extend([dict_to_device(annotation, device) for annotation in annotations])
 
     counts = model.total_counts() / n_frames
 
-    tee_print(f'Sparsity: {total_sparsity / count}', output_file)
-    tee_print(f'Model latency (GPU): {model_latency / count} ms', output_file)
-    tee_print(f'System latency: {system_latency / count} ms', output_file)
-    tee_print(f'Tracker latency: {tracker_latency / count} ms', output_file)
-    tee_print(f'Memory: {memory / count} MB', output_file)
+    model_frames = max(model_frame_count, 1)
+    total_frames = max(count, 1)
+    avg_model_sparsity = total_sparsity / model_frames
+    tee_print(f'Sparsity: {avg_model_sparsity}', output_file)
+    tee_print(f'Model latency (GPU): {model_latency / model_frames} ms', output_file)
+    tee_print(f'System latency: {system_latency / total_frames} ms', output_file)
+    tee_print(f'Tracker latency: {tracker_latency / total_frames} ms', output_file)
+    tee_print(f'Memory: {memory / model_frames} MB', output_file)
     if config["model"]["backbone_config"]["backbone"] == "windowed":
         tee_print(f'GFLOPs: {sum([value for _, value in counts.items()]) / 1e9}', output_file)
     # MeanAveragePrecision is extremely slow. It seems fastest to call
     # update() and compute() just once, after all predictions are done.
     else:
-        mask_index_test, _ = model.get_region_mask_static(region_sparsity=1 - total_sparsity/count) # sparsity is keep rate
+        mask_index_test, _ = model.get_region_mask_static(region_sparsity=1 - avg_model_sparsity) # sparsity is keep rate
         _, x = model.pre_backbone(frame.to(device))
         macs = profile_macs(model.backbone, (x, None, 12, mask_index_test))
         tee_print(f'GFLOPs (torchprofile): {macs / 1e9}', output_file)
