@@ -376,6 +376,12 @@ class ArgoverseHD(Dataset):
                 fp,
             )
 
+        # Mark the prepared directory as "unpacked" so downstream VID loaders
+        # know they don't need the original tar archives.
+        unpacked_flag = self.prepared_root / "unpacked"
+        unpacked_flag.parent.mkdir(parents=True, exist_ok=True)
+        unpacked_flag.touch()
+
     def _prepare_sequence_metadata(
         self, json_data: Dict
     ) -> (Dict[int, Path], Dict[int, str]):
