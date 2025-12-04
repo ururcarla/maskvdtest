@@ -220,6 +220,11 @@ def main():
     config["model"]["classes"] = n_classes
     model = ViTDet(**(config["model"]))
     ckpt = torch.load(config["weights"])
+    for key in list(ckpt.keys()):
+        if key.startswith("roi_heads.box_predictor.cls_score") or key.startswith(
+            "roi_heads.box_predictor.bbox_pred"
+        ):
+            del ckpt[key]
 
     msg = model.load_state_dict(ckpt, strict=False)
     tee_print(msg, output_file)
