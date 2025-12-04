@@ -74,6 +74,12 @@ def parse_args():
         help="每个窗口最多采样的连续帧数。",
     )
     parser.add_argument(
+        "--min-frames",
+        type=int,
+        default=1,
+        help="每个窗口至少需要的帧数；不足则重新采样。",
+    )
+    parser.add_argument(
         "--region-size",
         type=int,
         default=16,
@@ -134,6 +140,7 @@ def sample_frame_groups(
     frames_root: Path,
     num_groups: int,
     max_frames: int,
+    min_frames: int,
     seed: int,
 ) -> List[List[FrameRecord]]:
     rng = random.Random(seed)
@@ -141,6 +148,7 @@ def sample_frame_groups(
     attempts = 0
     max_attempts = num_groups * 50
     visited = set()
+    min_frames = max(1, min(min_frames, max_frames))
 
     while len(groups) < num_groups and attempts < max_attempts:
         attempts += 1
@@ -152,6 +160,8 @@ def sample_frame_groups(
         end = min(len(frames), start + max_frames)
         window = frames[start:end]
         if not window:
+            continue
+        if len(window) < min_frames:
             continue
         key = (video_info["video_id"], window[0]["filename"])
         if key in visited:
@@ -171,7 +181,7 @@ def sample_frame_groups(
     if len(groups) < num_groups:
         print(
             f"[警告] 仅采样到 {len(groups)} 组窗口（目标 {num_groups}）。"
-            "请确认数据完整或调大 max_frames。",
+            "请确认数据完整、适当降低 min_frames 或增大 max_frames。",
         )
     return groups
 
@@ -310,6 +320,7 @@ def main():
         frames_root,
         args.num_groups,
         args.max_frames,
+        args.min_frames,
         args.seed,
     )
     heatmap_paths = []
