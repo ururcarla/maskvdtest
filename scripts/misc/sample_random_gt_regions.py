@@ -17,7 +17,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description=(
             "随机抽取若干视频片段，累计每段内不超过指定帧数的GT框，"
-            "输出对应的区域热力图并生成包含原始帧预览的合成大图。"
+            "输出对应的区域热力图并生成合成大图。"
         )
     )
     parser.add_argument(
@@ -72,7 +72,7 @@ def parse_args():
         "--frames-root",
         type=Path,
         default=None,
-        help="真实帧图像所在目录，若未提供则默认取 labels.json 同级目录下的 frames。",
+        help="真实帧图像所在目录，默认尝试使用 labels.json 同级（或上级）的 frames 文件夹。",
     )
     parser.add_argument(
         "--combined-output",
@@ -87,22 +87,28 @@ def parse_args():
         help="合成图的列数（默认 5，即 5x2 摆放 10 张图）。",
     )
     parser.add_argument(
-        "--preview-frames",
+        "--frames-per-image",
         type=int,
-        default=4,
-        help="每个样本展示的原始帧数量；设为0可关闭帧预览。",
+        default=None,
+        help="单个帧拼图包含的帧数，默认与 --frames-per-sample 相同。",
     )
     parser.add_argument(
-        "--preview-height",
-        type=int,
-        default=260,
-        help="帧预览与热力图统一缩放的高度，宽度按比例缩放。",
+        "--frame-output-dir",
+        type=Path,
+        default=None,
+        help="帧拼图输出目录（默认 output-dir/frame_mosaics）。",
     )
     parser.add_argument(
-        "--preview-padding",
+        "--frame-grid-cols",
         type=int,
-        default=12,
-        help="帧预览与热力图之间的间距像素。",
+        default=6,
+        help="帧拼图网格列数，默认 6（30 帧时约为 5x6 网格）。",
+    )
+    parser.add_argument(
+        "--frame-thumb-max-side",
+        type=int,
+        default=320,
+        help="帧缩略图的最大边长像素（默认 320）。",
     )
     return parser.parse_args()
 
@@ -171,93 +177,130 @@ def resolve_frame_path(frame: Dict, frames_root: Optional[Path]) -> Optional[Pat
     if frames_root is None:
         return None
     relative = Path(PurePosixPath(frame["file_name"]))
-    candidates = []
-    if relative.suffix:
-        candidates.append(frames_root / relative)
-    else:
-        candidates.append((frames_root / relative).with_suffix(".jpg"))
-        candidates.append((frames_root / relative).with_suffix(".jpeg"))
-        candidates.append((frames_root / relative).with_suffix(".png"))
     video_id = str(frame["video_id"])
     frame_idx = frame["frame_idx"]
-    for ext in (".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG"):
-        candidates.append(frames_root / video_id / f"{frame_idx:06d}{ext}")
-        candidates.append(frames_root / video_id / f"{frame_idx}{ext}")
+    candidates = []
+    seen = set()
+
+    def add_candidate(path: Optional[Path]):
+        if path is None:
+            return
+        resolved = Path(path)
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        candidates.append(resolved)
+
+    add_candidate(frames_root / relative)
+    if not relative.suffix:
+        for ext in (".jpg", ".jpeg", ".png"):
+            add_candidate((frames_root / relative).with_suffix(ext))
+    add_candidate(frames_root / relative.name)
+    if not relative.name.endswith((".jpg", ".jpeg", ".png")):
+        for ext in (".jpg", ".jpeg", ".png"):
+            add_candidate((frames_root / relative.name).with_suffix(ext))
+    add_candidate(frames_root / video_id / relative.name)
+    if not relative.name.endswith((".jpg", ".jpeg", ".png")):
+        for ext in (".jpg", ".jpeg", ".png"):
+            add_candidate((frames_root / video_id / relative.name).with_suffix(ext))
+    idx_tokens = {f"{frame_idx:06d}", f"{frame_idx:05d}", str(frame_idx)}
+    for token in idx_tokens:
+        for ext in (".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG"):
+            add_candidate(frames_root / video_id / f"{token}{ext}")
+
     for candidate in candidates:
-        if candidate.exists():
-            return candidate
+        try:
+            if candidate.exists():
+                return candidate
+        except OSError:
+            continue
     return None
 
 
-def select_preview_paths(
-    frames: Sequence[Dict], frames_root: Optional[Path], max_preview: int
-) -> List[Path]:
-    if max_preview <= 0 or frames_root is None:
+def select_frame_indices(total: int, target: int) -> List[int]:
+    if target <= 0 or total <= 0:
         return []
-    total = len(frames)
-    if total == 0:
-        return []
-    count = min(max_preview, total)
-    indices = (
-        np.linspace(0, total - 1, count, dtype=int) if count > 1 else np.array([0])
-    )
-    preview_paths: List[Path] = []
-    seen = set()
-    for idx in indices:
-        frame = frames[int(idx)]
-        frame_path = resolve_frame_path(frame, frames_root)
-        if frame_path is None or frame_path in seen:
-            continue
-        preview_paths.append(frame_path)
-        seen.add(frame_path)
-    return preview_paths
+    if total <= target:
+        return list(range(total))
+    return list(np.linspace(0, total - 1, target, dtype=int))
 
 
-def resize_to_height(image: Image.Image, target_height: int) -> Image.Image:
-    if target_height <= 0:
+def resize_with_max_side(image: Image.Image, max_side: int) -> Image.Image:
+    if max_side is None or max_side <= 0:
         return image
     w, h = image.size
-    if h == target_height:
+    longest = max(w, h)
+    if longest <= max_side:
         return image
-    scale = target_height / h
-    new_size = (max(1, int(round(w * scale))), target_height)
+    scale = max_side / longest
+    new_size = (max(1, int(round(w * scale))), max(1, int(round(h * scale))))
     return image.resize(new_size, Image.BILINEAR)
 
 
-def build_sample_panel(
-    heatmap_path: Path,
-    preview_paths: Sequence[Path],
+def render_frame_grid(
+    image_paths: Sequence[Path],
+    grid_cols: int,
     output_path: Path,
-    target_height: int,
-    padding: int,
-    bg_color=(10, 10, 10),
+    thumb_max_side: int,
+    padding: int = 8,
+    margin: int = 18,
+    bg_color=(12, 12, 12),
 ):
-    with Image.open(heatmap_path) as heatmap_img:
-        heatmap = resize_to_height(heatmap_img.convert("RGB"), target_height)
-    preview_images: List[Image.Image] = []
-    for path in preview_paths:
+    if not image_paths:
+        return
+    thumbs: List[Image.Image] = []
+    for path in image_paths:
         try:
             with Image.open(path) as img:
-                preview_images.append(resize_to_height(img.convert("RGB"), target_height))
-        except FileNotFoundError:
+                thumbs.append(resize_with_max_side(img.convert("RGB"), thumb_max_side))
+        except (FileNotFoundError, OSError):
             continue
-        except OSError:
-            continue
-    if not preview_images:
-        heatmap.save(output_path)
-        return output_path
-    total_width = heatmap.width + padding * (len(preview_images) + 1)
-    total_width += sum(img.width for img in preview_images)
-    total_height = target_height + padding * 2
-    canvas = Image.new("RGB", (total_width, total_height), color=bg_color)
-    x = padding
-    y = padding
-    for img in preview_images:
-        canvas.paste(img, (x, y))
-        x += img.width + padding
-    canvas.paste(heatmap, (x, y))
+    if not thumbs:
+        return
+    max_w = max(img.width for img in thumbs)
+    max_h = max(img.height for img in thumbs)
+    grid_cols = max(1, min(grid_cols, len(thumbs)))
+    grid_rows = math.ceil(len(thumbs) / grid_cols)
+    width = margin * 2 + grid_cols * max_w + (grid_cols - 1) * padding
+    height = margin * 2 + grid_rows * max_h + (grid_rows - 1) * padding
+    canvas = Image.new("RGB", (width, height), color=bg_color)
+    for idx, thumb in enumerate(thumbs):
+        row = idx // grid_cols
+        col = idx % grid_cols
+        x = margin + col * (max_w + padding)
+        y = margin + row * (max_h + padding)
+        canvas.paste(thumb, (x, y))
     output_path.parent.mkdir(parents=True, exist_ok=True)
     canvas.save(output_path)
+
+
+def export_frame_mosaic(
+    frames: Sequence[Dict],
+    frames_root: Optional[Path],
+    expected_count: int,
+    grid_cols: int,
+    thumb_max_side: int,
+    output_path: Path,
+    sample_label: str = "",
+) -> Optional[Path]:
+    if frames_root is None or expected_count <= 0:
+        return None
+    resolved: List[Path] = []
+    for frame in frames:
+        path = resolve_frame_path(frame, frames_root)
+        if path is not None:
+            resolved.append(path)
+    if not resolved:
+        return None
+    if len(resolved) < expected_count and sample_label:
+        print(
+            f"提示：{sample_label} 可用帧数 {len(resolved)} 低于目标 {expected_count}，将按现有帧数生成拼图。"
+        )
+    indices = select_frame_indices(len(resolved), expected_count)
+    selected_paths = [resolved[i] for i in indices if i < len(resolved)]
+    if not selected_paths:
+        return None
+    render_frame_grid(selected_paths, grid_cols, output_path, thumb_max_side)
     return output_path
 
 
@@ -296,9 +339,12 @@ def pick_segment(
     frames_per_sample: int,
     rng: random.Random,
     min_boxes: int,
+    min_frames_required: int,
     max_attempts: int = 12,
 ) -> Optional[Dict]:
     if not frames:
+        return None
+    if len(frames) < max(1, min_frames_required):
         return None
     attempts = min(max_attempts, len(frames))
     for _ in range(attempts):
@@ -308,6 +354,8 @@ def pick_segment(
             start = rng.randint(0, max(len(frames) - frames_per_sample, 0))
         end = min(len(frames), start + frames_per_sample)
         segment = frames[start:end]
+        if len(segment) < max(1, min_frames_required):
+            continue
         total_boxes = sum(len(frame["boxes"]) for frame in segment)
         if total_boxes >= min_boxes:
             return {
@@ -392,12 +440,44 @@ def main():
     canvas_height = args.canvas_height or max_height
     canvas_width = args.canvas_width or max_width
     video_ids = list(videos.keys())
+
     frames_root = args.frames_root
+    if frames_root is not None and not frames_root.exists():
+        print(f"警告：指定的 frames-root={frames_root} 不存在，将忽略帧导出。")
+        frames_root = None
     if frames_root is None:
-        candidate_root = args.labels.parent / "frames"
-        frames_root = candidate_root if candidate_root.exists() else None
+        candidates = [
+            args.labels.parent / "frames",
+            args.labels.parent.parent / "frames",
+            args.labels.parent.parent / args.labels.parent.name / "frames",
+        ]
+        for candidate in candidates:
+            try:
+                if candidate.exists():
+                    frames_root = candidate
+                    print(f"提示：自动检测到帧目录 {frames_root}")
+                    break
+            except OSError:
+                continue
     if frames_root is None:
-        print("提示：未找到 frames 根目录，将仅输出热力图。")
+        print("提示：未找到可用的帧目录，将仅输出热力图。")
+
+    frames_per_image = args.frames_per_image
+    if frames_per_image is None:
+        frames_per_image = args.frames_per_sample
+    if frames_per_image < 0:
+        frames_per_image = 0
+    if frames_per_image > args.frames_per_sample:
+        print(
+            f"提示：frames-per-image({frames_per_image}) 超过 frames-per-sample({args.frames_per_sample})，"
+            "将按后者限制。"
+        )
+        frames_per_image = args.frames_per_sample
+    min_frames_required = (
+        max(1, min(args.frames_per_sample, frames_per_image))
+        if frames_per_image > 0
+        else 1
+    )
 
     # 先按区间分层，保证抽样分布更分散。
     candidate_videos = stratified_video_ids(
@@ -413,7 +493,11 @@ def main():
         if len(samples) >= args.samples:
             break
         segment = pick_segment(
-            videos[video_id], args.frames_per_sample, rng, args.min_boxes
+            videos[video_id],
+            args.frames_per_sample,
+            rng,
+            args.min_boxes,
+            min_frames_required=min_frames_required,
         )
         if segment is None:
             continue
@@ -428,7 +512,12 @@ def main():
 
     output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
-    display_paths = []
+    frame_output_dir = (
+        args.frame_output_dir
+        if args.frame_output_dir is not None
+        else output_dir / "frame_mosaics"
+    )
+    heatmap_paths = []
     for idx, sample in enumerate(samples, start=1):
         heatmap = accumulate_heatmap(
             sample["frames"], canvas_height=canvas_height, canvas_width=canvas_width
@@ -444,26 +533,25 @@ def main():
         )
         out_path = output_dir / filename
         render_heatmap(heatmap, title, out_path)
-        panel_path = None
-        preview_paths = select_preview_paths(
-            sample["frames"], frames_root, args.preview_frames
-        )
-        if preview_paths:
-            panel_path = output_dir / (out_path.stem + "_panel.png")
-            build_sample_panel(
-                out_path,
-                preview_paths,
-                panel_path,
-                args.preview_height,
-                args.preview_padding,
+        mosaic_path = None
+        if frames_root is not None and frames_per_image > 0:
+            mosaic_name = f"{Path(filename).stem}_frames.png"
+            mosaic_path = export_frame_mosaic(
+                sample["frames"],
+                frames_root,
+                frames_per_image,
+                args.frame_grid_cols,
+                args.frame_thumb_max_side,
+                frame_output_dir / mosaic_name,
+                sample_label=title,
             )
-        display_paths.append(panel_path or out_path)
-        print(
-            f"[{idx:02d}] {title} -> {out_path}"
-            + ("" if not panel_path else f"（含帧预览：{panel_path.name}）")
-        )
+        heatmap_paths.append(out_path)
+        if mosaic_path is not None:
+            print(f"[{idx:02d}] {title} -> 热力图: {out_path} | 帧拼图: {mosaic_path}")
+        else:
+            print(f"[{idx:02d}] {title} -> {out_path}")
 
-    if not display_paths:
+    if not heatmap_paths:
         raise RuntimeError("未能生成任何热力图，请调整筛选参数后重试。")
 
     combined_output = (
@@ -471,7 +559,7 @@ def main():
         if args.combined_output is not None
         else output_dir / "heatmap_mosaic.png"
     )
-    build_mosaic(display_paths, args.grid_cols, combined_output)
+    build_mosaic(heatmap_paths, args.grid_cols, combined_output)
     print(f"合成图已保存至 {combined_output.resolve()}")
 
 
