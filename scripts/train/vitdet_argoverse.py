@@ -42,27 +42,27 @@ def train_pass(config, device, epoch, model, optimizer, lr_sched, data, tensorbo
     accum_iter = config["accum_iter"]
     for _, vid_item in tqdm(zip(range(n_items), data), total=n_items, ncols=0):
         vid_item = DataLoader(vid_item, batch_size=1, collate_fn=collate_fn)
-        for frame, annotations in vid_item:
-            step += 1
-            annotation_list = []
-            gt_instances = []
-            for annotation in annotations:
-                for i, bbox in enumerate(annotation["boxes"]):
-                    annotation_dict = {
-                        "bbox": bbox,
-                        "category_id": annotation["labels"][i],
-                        "bbox_mode": BoxMode.XYXY_ABS,
-                    }
-                    annotation_list.append(annotation_dict)
-                gt_instance = annotations_to_instances(
-                    annotation_list, frame.shape[-2:], frame.shape[-2:]
-                )
-                gt_instances.append(gt_instance.to(device))
+        with EventStorage() as storage:
+            for frame, annotations in vid_item:
+                step += 1
+                annotation_list = []
+                gt_instances = []
+                for annotation in annotations:
+                    for i, bbox in enumerate(annotation["boxes"]):
+                        annotation_dict = {
+                            "bbox": bbox,
+                            "category_id": annotation["labels"][i],
+                            "bbox_mode": BoxMode.XYXY_ABS,
+                        }
+                        annotation_list.append(annotation_dict)
+                    gt_instance = annotations_to_instances(
+                        annotation_list, frame.shape[-2:], frame.shape[-2:]
+                    )
+                    gt_instances.append(gt_instance.to(device))
 
-            if step % accum_iter == 0:
-                lr_sched.adjust_learning_rate(step / n_items + epoch)
+                if step % accum_iter == 0:
+                    lr_sched.adjust_learning_rate(step / n_items + epoch)
 
-            with EventStorage() as storage:
                 images, x = model.pre_backbone(frame.to(device))
                 if config["mask"] == "static":
                     mask_index, _ = model.get_region_mask_static(
@@ -80,21 +80,21 @@ def train_pass(config, device, epoch, model, optimizer, lr_sched, data, tensorbo
                 )
                 _, detector_losses = model.roi_heads(images, x, proposals, gt_instances)
 
-            losses = {}
-            losses.update(detector_losses)
-            losses.update(proposal_losses)
-            loss = sum(losses.values())
-            loss.backward(retain_graph=True)
-            total_loss += loss.item()
-            if step % accum_iter == 0:
-                tee_print(
-                    f"Loss: {total_loss/step}, lr: {optimizer.param_groups[0]['lr']}",
-                    output_file,
-                )
-                optimizer.step()
-                optimizer.zero_grad()
-            if tensorboard is not None:
-                tensorboard.add_scalar("train/loss", loss.item())
+                losses = {}
+                losses.update(detector_losses)
+                losses.update(proposal_losses)
+                loss = sum(losses.values())
+                loss.backward()
+                total_loss += loss.item()
+                if step % accum_iter == 0:
+                    tee_print(
+                        f"Loss: {total_loss/step}, lr: {optimizer.param_groups[0]['lr']}",
+                        output_file,
+                    )
+                    optimizer.step()
+                    optimizer.zero_grad()
+                if tensorboard is not None:
+                    tensorboard.add_scalar("train/loss", loss.item())
 
 
 def val_pass(device, model, data, config):
