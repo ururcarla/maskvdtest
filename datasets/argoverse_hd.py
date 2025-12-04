@@ -437,6 +437,19 @@ class ArgoverseHD(Dataset):
                 return candidate
         return (self.location / path).resolve()
 
+    @staticmethod
+    def _frame_sort_key(frame_entry: Dict):
+        frame_id = frame_entry.get("frame_id")
+        timestamp = frame_entry.get("timestamp")
+        filename = frame_entry["filename"]
+        return (
+            0 if frame_id is not None else 1,
+            frame_id if frame_id is not None else 0,
+            0 if timestamp is not None else 1,
+            timestamp if timestamp is not None else 0,
+            filename,
+        )
+
 
 def replicate_file(src: Path, dst: Path, force_copy: bool) -> None:
     if dst.exists():
@@ -464,18 +477,4 @@ def tqdm_list(data: List[Dict], desc: str):
         return tqdm(data, desc=desc, unit="video")
     except Exception:
         return data
-
-    @staticmethod
-    def _frame_sort_key(frame_entry: Dict):
-        # Prefer explicit frame_id, then timestamp, finally filename.
-        frame_id = frame_entry.get("frame_id")
-        timestamp = frame_entry.get("timestamp")
-        filename = frame_entry["filename"]
-        return (
-            0 if frame_id is not None else 1,
-            frame_id if frame_id is not None else 0,
-            0 if timestamp is not None else 1,
-            timestamp if timestamp is not None else 0,
-            filename,
-        )
 
