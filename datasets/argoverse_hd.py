@@ -248,7 +248,14 @@ class ArgoverseHD(Dataset):
 
         sequences = json_data.get("sequences")
         if isinstance(sequences, list):
-            for seq in sequences:
+            for idx, seq in enumerate(sequences):
+                if isinstance(seq, str):
+                    resolved = self._normalize_seq_dir(seq)
+                    if resolved is not None:
+                        sid = sid_offset + idx
+                        dir_map[sid] = resolved
+                        name_map[sid] = Path(seq).stem
+                    continue
                 sid = seq.get("sid")
                 if sid is None:
                     sid = seq.get("id")
