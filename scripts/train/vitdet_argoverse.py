@@ -45,9 +45,9 @@ def train_pass(config, device, epoch, model, optimizer, lr_sched, data, tensorbo
         model.reset()
         for frame, annotations in vid_item:
             step += 1
-            annotation_list = []
             gt_instances = []
             for ann in annotations:
+                annotation_list = []
                 ann_boxes = ann["boxes"]
                 ann_labels = ann["labels"]
                 for i in range(len(ann_boxes)):
