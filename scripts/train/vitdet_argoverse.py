@@ -62,28 +62,29 @@ def train_pass(config, device, epoch, model, optimizer, lr_sched, data, tensorbo
             if step % accum_iter == 0:
                 lr_sched.adjust_learning_rate(step / n_items + epoch)
 
-            images, x = model.pre_backbone(frame.to(device))
-            if config["mask"] == "static":
-                mask_index, _ = model.get_region_mask_static(
-                    region_sparsity=1 - config["sparsity"]
+            with EventStorage() as storage:
+                images, x = model.pre_backbone(frame.to(device))
+                if config["mask"] == "static":
+                    mask_index, _ = model.get_region_mask_static(
+                        region_sparsity=1 - config["sparsity"]
+                    )
+                    x = model.backbone(x, mask_id=mask_index)
+                else:
+                    x = model.backbone(x)
+                x = x.transpose(-1, -2)
+                x = x.view(x.shape[:-1] + model.backbone_input_size)
+                x = model.pyramid(x)
+                x = dict(zip(model.proposal_generator.in_features, x))
+                proposals, proposal_losses = model.proposal_generator(
+                    images, x, gt_instances
                 )
-                x = model.backbone(x, mask_id=mask_index)
-            else:
-                x = model.backbone(x)
-            x = x.transpose(-1, -2)
-            x = x.view(x.shape[:-1] + model.backbone_input_size)
-            x = model.pyramid(x)
-            x = dict(zip(model.proposal_generator.in_features, x))
-            proposals, proposal_losses = model.proposal_generator(
-                images, x, gt_instances
-            )
-            _, detector_losses = model.roi_heads(images, x, proposals, gt_instances)
+                _, detector_losses = model.roi_heads(images, x, proposals, gt_instances)
 
             losses = {}
             losses.update(detector_losses)
             losses.update(proposal_losses)
             loss = sum(losses.values())
-            loss.backward()
+            loss.backward(retain_graph=True)
             total_loss += loss.item()
             if step % accum_iter == 0:
                 tee_print(
