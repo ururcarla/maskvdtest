@@ -125,6 +125,9 @@ class ArgoverseHD(Dataset):
     ) -> Optional[VID]:
         if not self._has_prepared_split():
             return None
+        unpacked_flag = self.prepared_root / "unpacked"
+        unpacked_flag.parent.mkdir(parents=True, exist_ok=True)
+        unpacked_flag.touch()
         prepared_split = self._prepared_split_name()
         return VID(
             self.prepared_root,
@@ -375,12 +378,6 @@ class ArgoverseHD(Dataset):
                 },
                 fp,
             )
-
-        # Mark the prepared directory as "unpacked" so downstream VID loaders
-        # know they don't need the original tar archives.
-        unpacked_flag = self.prepared_root / "unpacked"
-        unpacked_flag.parent.mkdir(parents=True, exist_ok=True)
-        unpacked_flag.touch()
 
     def _prepare_sequence_metadata(
         self, json_data: Dict
