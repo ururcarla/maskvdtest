@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-随机抽取 ImageNet VID 连续帧窗口，基于 GT 标注生成区域热图与帧集合拼图。
+随机抽取视频连续帧窗口（支持 ImageNet VID、Argoverse-HD），
+基于 GT 标注生成区域热图与帧集合拼图。
 
 使用方式：
     python scripts/misc/sample_vid_window_heatmaps.py \
@@ -34,6 +35,7 @@ project_root = Path(__file__).resolve().parent.parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
+from datasets.argoverse_hd import ArgoverseHD  # noqa: E402
 from datasets.vid import VID  # noqa: E402
 
 
@@ -46,20 +48,27 @@ class FrameRecord:
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="随机采样 VID 连续帧，生成 GT 区域热图与帧集合拼图。",
+        description="随机采样连续帧窗口，生成 GT 区域热图与帧集合拼图。",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
         "--dataset-root",
         type=Path,
         default=Path("./data1", "vid_data"),
-        help="VID 数据根目录（包含 vid_val/vid_train 等子目录）。",
+        help="数据根目录。VID: data1/vid_data；Argoverse-HD: argoversehd。",
     )
     parser.add_argument(
         "--split",
         type=str,
         default="vid_val",
-        help="使用的数据 split，例如 vid_val、vid_train、vid_minival。",
+        help="使用的数据 split，例如 vid_val、vid_train、val、train。",
+    )
+    parser.add_argument(
+        "--dataset-type",
+        type=str,
+        choices=["vid", "argoverse_hd"],
+        default="vid",
+        help="数据集类型：ImageNet VID 或 Argoverse-HD。",
     )
     parser.add_argument(
         "--num-groups",
@@ -121,23 +130,68 @@ def parse_args():
         default=5,
         help="最终 10 张热图拼接时的列数。",
     )
+    parser.add_argument(
+        "--argoverse-annotations",
+        type=Path,
+        default=None,
+        help="Argoverse-HD annotations 路径（默认根据 split 自动推断）。",
+    )
+    parser.add_argument(
+        "--verify-frames",
+        action="store_true",
+        help="Argoverse-HD：索引阶段验证每一帧图像文件是否存在。",
+    )
     return parser.parse_args()
 
 
-def load_video_infos(dataset_root: Path, split: str):
+def load_vid_sequences(dataset_root: Path, split: str):
+    dataset_root = Path(dataset_root)
     labels_path = dataset_root / split / "labels.json"
     if not labels_path.exists():
         raise FileNotFoundError(f"未找到 {labels_path}，请确认数据已解压。")
-    video_infos = VID._get_videos_info(dataset_root, split)  # pylint: disable=protected-access
     frames_root = dataset_root / split / "frames"
     if not frames_root.exists():
         raise FileNotFoundError(f"未找到帧目录 {frames_root}，请确认图像已就绪。")
-    return video_infos, frames_root
+    video_infos = VID._get_videos_info(dataset_root, split)  # pylint: disable=protected-access
+    for video in video_infos:
+        video_id = video["video_id"]
+        for frame in video["frames"]:
+            frame_path = frames_root / video_id / frame["filename"]
+            frame["path"] = str(frame_path)
+    return video_infos
+
+
+def load_argoverse_sequences(
+    dataset_root: Path,
+    split: str,
+    annotations_path: Optional[Path],
+    verify_frames: bool,
+):
+    dataset = ArgoverseHD(
+        Path(dataset_root),
+        split=split,
+        annotations_path=annotations_path,
+        verify_frames=verify_frames,
+        shuffle=False,
+    )
+    return dataset.video_info
+
+
+def load_sequences(args) -> List[dict]:
+    if args.dataset_type == "vid":
+        return load_vid_sequences(args.dataset_root, args.split)
+    if args.dataset_type == "argoverse_hd":
+        return load_argoverse_sequences(
+            args.dataset_root,
+            args.split,
+            args.argoverse_annotations,
+            args.verify_frames,
+        )
+    raise ValueError(f"不支持的数据集类型：{args.dataset_type}")
 
 
 def sample_frame_groups(
     video_infos,
-    frames_root: Path,
     num_groups: int,
     max_frames: int,
     min_frames: int,
@@ -169,7 +223,12 @@ def sample_frame_groups(
         visited.add(key)
         frame_records = []
         for frame in window:
-            frame_path = frames_root / video_info["video_id"] / frame["filename"]
+            path_str = frame.get("path")
+            if path_str is None:
+                raise RuntimeError(
+                    f"frame 缺少路径信息：video_id={video_info['video_id']} frame={frame['filename']}"
+                )
+            frame_path = Path(path_str)
             frame_records.append(
                 FrameRecord(
                     path=frame_path,
@@ -314,10 +373,9 @@ def build_heatmap_mosaic(image_paths: List[Path], output_path: Path, cols: int):
 
 def main():
     args = parse_args()
-    video_infos, frames_root = load_video_infos(args.dataset_root, args.split)
+    video_infos = load_sequences(args)
     groups = sample_frame_groups(
         video_infos,
-        frames_root,
         args.num_groups,
         args.max_frames,
         args.min_frames,

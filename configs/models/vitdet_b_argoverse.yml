@@ -1,0 +1,6 @@
+_defaults:
+  - "vitdet_b_coco.yml"
+model:
+  classes: 8
+  detectron2_config: "configs/detectron/vitdet_b_argoverse.py"
+
