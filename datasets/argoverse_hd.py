@@ -108,8 +108,13 @@ class ArgoverseHD(Dataset):
         name = "test-meta.json" if split == "test" else f"{split}.json"
         return self.location / "Argoverse-HD" / "annotations" / name
 
+    def _prepared_split_name(self) -> str:
+        if self.split in {"train", "val"}:
+            return f"vid_{self.split}"
+        return self.split
+
     def _prepared_split_root(self) -> Path:
-        return self.prepared_root / self.split
+        return self.prepared_root / self._prepared_split_name()
 
     def _has_prepared_split(self) -> bool:
         split_root = self._prepared_split_root()
@@ -120,9 +125,10 @@ class ArgoverseHD(Dataset):
     ) -> Optional[VID]:
         if not self._has_prepared_split():
             return None
+        prepared_split = self._prepared_split_name()
         return VID(
             self.prepared_root,
-            split=split,
+            split=prepared_split,
             tar_path=None,
             shuffle=shuffle,
             shuffle_seed=shuffle_seed,
