@@ -43,6 +43,8 @@ class ArgoverseHD(Dataset):
 
         self.images_root = self.location / "Argoverse-1.1" / "tracking"
         self.split_root = self.images_root / split
+        self.sequence_dirs_by_sid: Dict[int, Path] = {}
+        self.sequence_name_by_sid: Dict[int, str] = {}
         self.annotations_path = (
             Path(annotations_path)
             if annotations_path is not None
@@ -89,6 +91,11 @@ class ArgoverseHD(Dataset):
         with self.annotations_path.open("r") as fp:
             json_data = json.load(fp)
 
+        (
+            self.sequence_dirs_by_sid,
+            self.sequence_name_by_sid,
+        ) = self._prepare_sequence_metadata(json_data)
+
         category_mapping = self._build_category_mapping(json_data.get("categories", []))
 
         frame_dict: Dict[int, Dict] = {}
@@ -129,24 +136,46 @@ class ArgoverseHD(Dataset):
         return video_info
 
     def _create_frame_entry(self, image_meta: Dict) -> Dict:
+        sid = image_meta.get("sid")
         seq_id = (
             image_meta.get("sequence_id")
             or image_meta.get("sequence")
             or image_meta.get("video_id")
         )
+        if seq_id is None and sid is not None:
+            seq_id = self.sequence_name_by_sid.get(int(sid))
+        file_name = image_meta.get("file_name") or image_meta.get("name")
         if seq_id is None:
-            seq_id = Path(image_meta["file_name"]).parent.name
+            if file_name and "/" in file_name:
+                seq_id = Path(file_name).parent.name
+            elif sid is not None:
+                seq_id = f"sid_{sid}"
+            else:
+                seq_id = str(image_meta.get("id"))
+        seq_id = str(seq_id)
 
         timestamp = image_meta.get("timestamp")
+        if timestamp is None:
+            timestamp = image_meta.get("time")
         frame_id = image_meta.get("frame_id")
-        file_name = image_meta["file_name"]
-        frame_path = self._resolve_frame_path(seq_id, file_name)
+        if frame_id is None:
+            frame_id = image_meta.get("fid")
+        if file_name is None:
+            raise KeyError("file_name")
+
+        seq_dir = None
+        if sid is not None:
+            seq_dir = self.sequence_dirs_by_sid.get(int(sid))
+
+        frame_path = self._resolve_frame_path(seq_id, file_name, seq_dir)
 
         annotation = {"boxes": [], "labels": []}
         if frame_id is not None:
-            annotation["frame_id"] = torch.tensor([frame_id])
+            frame_id_int = int(frame_id)
+            annotation["frame_id"] = torch.tensor([frame_id_int])
         if timestamp is not None:
-            annotation["timestamp"] = torch.tensor([timestamp])
+            timestamp_val = int(timestamp)
+            annotation["timestamp"] = torch.tensor([timestamp_val])
 
         return {
             "sequence_id": seq_id,
@@ -157,7 +186,9 @@ class ArgoverseHD(Dataset):
             "annotations": annotation,
         }
 
-    def _resolve_frame_path(self, sequence_id: str, file_name: str) -> Path:
+    def _resolve_frame_path(
+        self, sequence_id: str, file_name: str, sequence_dir: Optional[Path] = None
+    ) -> Path:
         """
         Resolve the actual image path. Argoverse-HD may store frames either directly
         under the sequence directory or inside a ring_front_center/ subdirectory.
@@ -168,6 +199,8 @@ class ArgoverseHD(Dataset):
         if file_path.is_absolute():
             candidates.append(file_path)
         else:
+            if sequence_dir is not None:
+                candidates.append(sequence_dir / file_path.name)
             candidates.extend(
                 [
                     self.images_root / file_path,
@@ -189,6 +222,66 @@ class ArgoverseHD(Dataset):
             )
 
         return candidates[0]
+
+    def _prepare_sequence_metadata(
+        self, json_data: Dict
+    ) -> (Dict[int, Path], Dict[int, str]):
+        dir_map: Dict[int, Path] = {}
+        name_map: Dict[int, str] = {}
+
+        sid_values = [
+            img.get("sid")
+            for img in json_data.get("images", [])
+            if isinstance(img.get("sid"), (int, float))
+        ]
+        sid_offset = int(min(sid_values)) if sid_values else 0
+
+        seq_dirs = json_data.get("seq_dirs")
+        if isinstance(seq_dirs, (list, tuple)):
+            for idx, seq_dir in enumerate(seq_dirs):
+                sid = sid_offset + idx
+                resolved = self._normalize_seq_dir(seq_dir)
+                if resolved is not None:
+                    dir_map[sid] = resolved
+                if seq_dir:
+                    name_map.setdefault(sid, Path(seq_dir).stem)
+
+        sequences = json_data.get("sequences")
+        if isinstance(sequences, list):
+            for seq in sequences:
+                sid = seq.get("sid")
+                if sid is None:
+                    sid = seq.get("id")
+                if sid is None:
+                    continue
+                sid = int(sid)
+                name = seq.get("name") or seq.get("sequence_name") or seq.get("dir")
+                if name:
+                    name_map[sid] = name
+                seq_dir_value = seq.get("dir") or seq.get("path") or seq.get("seq_dir")
+                resolved = self._normalize_seq_dir(seq_dir_value)
+                if resolved is not None:
+                    dir_map[sid] = resolved
+
+        return dir_map, name_map
+
+    def _normalize_seq_dir(self, seq_dir: Optional[str]) -> Optional[Path]:
+        if not seq_dir:
+            return None
+        path = Path(seq_dir)
+        if path.is_absolute():
+            return path
+
+        candidate_roots = [
+            self.location,
+            self.images_root,
+            self.split_root,
+        ]
+        for root in candidate_roots:
+            candidate = root / path
+            if candidate.exists():
+                return candidate
+        return (self.location / path).resolve()
 
     @staticmethod
     def _frame_sort_key(frame_entry: Dict):
