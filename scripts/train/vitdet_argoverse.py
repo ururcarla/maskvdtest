@@ -28,6 +28,12 @@ from torch.utils.tensorboard import SummaryWriter
 from utils.misc import dict_to_device, squeeze_dict, get_pytorch_device, set_policies
 from backbones.policies import TokenNormTopK
 
+
+def collate_fn(batch):
+    batch = list(zip(*batch))
+    batch[0] = torch.stack(batch[0])
+    return tuple(batch)
+
 def train_pass(config, device, epoch, model, optimizer, lr_sched, data, tensorboard, output_file):
     model.train()
     n_items = config.get("n_items", len(data))
@@ -35,7 +41,7 @@ def train_pass(config, device, epoch, model, optimizer, lr_sched, data, tensorbo
     total_loss = 0
     accum_iter = config["accum_iter"]
     for _, vid_item in tqdm(zip(range(n_items), data), total=n_items, ncols=0):
-        vid_item = DataLoader(vid_item, batch_size=1)
+        vid_item = DataLoader(vid_item, batch_size=1, collate_fn=collate_fn)
         model.reset()
         for frame, annotations in vid_item:
             step += 1
@@ -106,7 +112,7 @@ def val_pass(device, model, data, config):
     count = 0
 
     for _, vid_item in tqdm(zip(range(n_items), data), total=n_items, ncols=0):
-        vid_item = DataLoader(vid_item, batch_size=1)
+        vid_item = DataLoader(vid_item, batch_size=1, collate_fn=collate_fn)
         n_frames += len(vid_item)
         model.reset()
         for frame, annotations in vid_item:
