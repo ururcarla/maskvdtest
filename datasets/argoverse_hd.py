@@ -307,10 +307,11 @@ class ArgoverseHD(Dataset):
         image_id = 0
         annotation_id = 0
 
-        for video in tqdm_list(self.video_info, desc=f"Prepare {self.split}"):
-            video_id = video["video_id"]
-            videos.append({"id": video_id, "file_name": video_id})
-            seq_dir = frames_root / video_id
+        for video_idx, video in enumerate(tqdm_list(self.video_info, desc=f"Prepare {self.split}")):
+            original_video_id = video["video_id"]
+            prepared_video_id = f"{video_idx:08d}"
+            videos.append({"id": prepared_video_id, "file_name": original_video_id})
+            seq_dir = frames_root / prepared_video_id
             seq_dir.mkdir(parents=True, exist_ok=True)
             for frame_idx, frame in enumerate(video["frames"]):
                 src_path = Path(frame["path"])
@@ -335,11 +336,15 @@ class ArgoverseHD(Dataset):
                         width = width or 0
                         height = height or 0
 
+                dest_stem = Path(dest_name).stem
+                dest_suffix = Path(dest_name).suffix or ".jpg"
+                dest_stem = Path(dest_name).stem
+                dest_suffix = Path(dest_name).suffix or ".jpg"
                 images.append(
                     {
                         "id": image_id,
-                        "file_name": f"{video_id}/{dest_name}",
-                        "video_id": video_id,
+                        "file_name": f"{prepared_video_id}_{dest_stem}{dest_suffix}",
+                        "video_id": prepared_video_id,
                         "frame_id": frame_idx,
                         "height": height,
                         "width": width,
