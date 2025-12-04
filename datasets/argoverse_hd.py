@@ -1,12 +1,16 @@
 import json
+import os
+import shutil
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
+from PIL import Image
+from tqdm import tqdm
 import torch
 from torch.utils.data import Dataset
 
-from datasets.vid import VIDItem
+from datasets.vid import VID, VIDItem
 from utils.misc import seeded_shuffle
 
 
@@ -32,6 +36,9 @@ class ArgoverseHD(Dataset):
         frame_transform=None,
         annotation_transform=None,
         combined_transform=None,
+        prepared_root: Optional[Path] = None,
+        auto_prepare: bool = True,
+        copy_images: bool = False,
     ) -> None:
         assert split in SPLITS, f"split must be one of {SPLITS}"
         self.location = Path(location)
@@ -40,6 +47,8 @@ class ArgoverseHD(Dataset):
         self.annotation_transform = annotation_transform
         self.combined_transform = combined_transform
         self.verify_frames = verify_frames
+        self.auto_prepare = auto_prepare
+        self.copy_images = copy_images
 
         self.images_root = self.location / "Argoverse-1.1" / "tracking"
         self.split_root = self.images_root / split
@@ -51,14 +60,38 @@ class ArgoverseHD(Dataset):
             else self._default_annotations_path(split)
         )
 
-        self.video_info = self._build_video_index()
+        self.prepared_root = (
+            Path(prepared_root)
+            if prepared_root is not None
+            else self.location / "prepared_vid"
+        )
+        self._prepared_dataset: Optional[VID] = self._try_load_prepared_dataset(
+            split, shuffle, shuffle_seed
+        )
+        if self._prepared_dataset is not None:
+            self.video_info = self._prepared_dataset.video_info
+            return
+
+        json_data = self._load_annotations()
+        self.video_info = self._build_video_index(json_data)
         if shuffle:
             seeded_shuffle(self.video_info, shuffle_seed)
 
+        if self.auto_prepare:
+            self._prepare_vid_layout(json_data)
+            prepared = self._try_load_prepared_dataset(split, shuffle, shuffle_seed)
+            if prepared is not None:
+                self._prepared_dataset = prepared
+                self.video_info = prepared.video_info
+
     def __len__(self) -> int:
+        if self._prepared_dataset is not None:
+            return len(self._prepared_dataset)
         return len(self.video_info)
 
     def __getitem__(self, index: int) -> VIDItem:
+        if self._prepared_dataset is not None:
+            return self._prepared_dataset[index]
         video_info = self.video_info[index]
         frame_paths = [frame["path"] for frame in video_info["frames"]]
         annotations = [frame["annotations"] for frame in video_info["frames"]]
@@ -75,6 +108,33 @@ class ArgoverseHD(Dataset):
         name = "test-meta.json" if split == "test" else f"{split}.json"
         return self.location / "Argoverse-HD" / "annotations" / name
 
+    def _prepared_split_root(self) -> Path:
+        return self.prepared_root / self.split
+
+    def _has_prepared_split(self) -> bool:
+        split_root = self._prepared_split_root()
+        return (split_root / "labels.json").is_file()
+
+    def _try_load_prepared_dataset(
+        self, split: str, shuffle: bool, shuffle_seed: int
+    ) -> Optional[VID]:
+        if not self._has_prepared_split():
+            return None
+        return VID(
+            self.prepared_root,
+            split=split,
+            tar_path=None,
+            shuffle=shuffle,
+            shuffle_seed=shuffle_seed,
+            frame_transform=self.frame_transform,
+            annotation_transform=self.annotation_transform,
+            combined_transform=self.combined_transform,
+        )
+
+    def _load_annotations(self) -> Dict:
+        with self.annotations_path.open("r") as fp:
+            return json.load(fp)
+
     def _build_category_mapping(self, categories: Sequence[Dict]) -> Dict[int, int]:
         """
         Argoverse-HD categories are not guaranteed to be zero-based.
@@ -87,10 +147,7 @@ class ArgoverseHD(Dataset):
             mapping[cat["id"]] = new_id
         return mapping
 
-    def _build_video_index(self) -> List[Dict]:
-        with self.annotations_path.open("r") as fp:
-            json_data = json.load(fp)
-
+    def _build_video_index(self, json_data: Dict) -> List[Dict]:
         (
             self.sequence_dirs_by_sid,
             self.sequence_name_by_sid,
@@ -163,13 +220,16 @@ class ArgoverseHD(Dataset):
         if file_name is None:
             raise KeyError("file_name")
 
+        height = image_meta.get("height")
+        width = image_meta.get("width")
+
         seq_dir = None
         if sid is not None:
             seq_dir = self.sequence_dirs_by_sid.get(int(sid))
 
         frame_path = self._resolve_frame_path(seq_id, file_name, seq_dir)
 
-        annotation = {"boxes": [], "labels": []}
+        annotation = {"boxes": [], "labels": [], "height": height, "width": width}
         if frame_id is not None:
             frame_id_int = int(frame_id)
             annotation["frame_id"] = torch.tensor([frame_id_int])
@@ -222,6 +282,93 @@ class ArgoverseHD(Dataset):
             )
 
         return candidates[0]
+
+    def _prepare_vid_layout(self, json_data: Dict) -> None:
+        split_root = self._prepared_split_root()
+        labels_path = split_root / "labels.json"
+        if labels_path.exists():
+            return
+        frames_root = split_root / "frames"
+        frames_root.mkdir(parents=True, exist_ok=True)
+
+        categories = json_data.get("categories", [])
+        images = []
+        annotations = []
+        videos = []
+        image_id = 0
+        annotation_id = 0
+
+        for video in tqdm_list(self.video_info, desc=f"Prepare {self.split}"):
+            video_id = video["video_id"]
+            videos.append({"id": video_id, "file_name": video_id})
+            seq_dir = frames_root / video_id
+            seq_dir.mkdir(parents=True, exist_ok=True)
+            for frame_idx, frame in enumerate(video["frames"]):
+                src_path = Path(frame["path"])
+                suffix = src_path.suffix or ".jpg"
+                dest_name = f"{frame_idx:06d}{suffix}"
+                dest_path = seq_dir / dest_name
+                if not src_path.exists():
+                    if self.verify_frames:
+                        raise FileNotFoundError(f"Missing frame {src_path}")
+                    else:
+                        continue
+                replicate_file(src_path, dest_path, self.copy_images)
+
+                metadata = frame["annotations"]
+                height = metadata.get("height")
+                width = metadata.get("width")
+                if (height is None or width is None) and dest_path.exists():
+                    try:
+                        with Image.open(dest_path) as img:
+                            width, height = img.size
+                    except Exception:
+                        width = width or 0
+                        height = height or 0
+
+                images.append(
+                    {
+                        "id": image_id,
+                        "file_name": f"{video_id}/{dest_name}",
+                        "video_id": video_id,
+                        "frame_id": frame_idx,
+                        "height": height,
+                        "width": width,
+                    }
+                )
+
+                boxes = metadata.get("boxes")
+                labels = metadata.get("labels")
+                if boxes is not None and labels is not None and boxes.numel() > 0:
+                    boxes_list = _tensor_to_list(boxes)
+                    labels_list = _tensor_to_list(labels)
+                    for box, label in zip(boxes_list, labels_list):
+                        x1, y1, x2, y2 = map(float, box)
+                        w = max(0.0, x2 - x1)
+                        h = max(0.0, y2 - y1)
+                        annotations.append(
+                            {
+                                "id": annotation_id,
+                                "image_id": image_id,
+                                "category_id": int(label) + 1,
+                                "bbox": [x1, y1, w, h],
+                                "area": w * h,
+                                "iscrowd": 0,
+                            }
+                        )
+                        annotation_id += 1
+                image_id += 1
+
+        with labels_path.open("w") as fp:
+            json.dump(
+                {
+                    "images": images,
+                    "annotations": annotations,
+                    "categories": categories,
+                    "videos": videos,
+                },
+                fp,
+            )
 
     def _prepare_sequence_metadata(
         self, json_data: Dict
@@ -289,6 +436,34 @@ class ArgoverseHD(Dataset):
             if candidate.exists():
                 return candidate
         return (self.location / path).resolve()
+
+
+def replicate_file(src: Path, dst: Path, force_copy: bool) -> None:
+    if dst.exists():
+        return
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if force_copy:
+            shutil.copy2(src, dst)
+        else:
+            os.link(src, dst)
+    except OSError:
+        shutil.copy2(src, dst)
+
+
+def _tensor_to_list(tensor) -> List:
+    if tensor is None:
+        return []
+    if hasattr(tensor, "tolist"):
+        return tensor.tolist()
+    return list(tensor)
+
+
+def tqdm_list(data: List[Dict], desc: str):
+    try:
+        return tqdm(data, desc=desc, unit="video")
+    except Exception:
+        return data
 
     @staticmethod
     def _frame_sort_key(frame_entry: Dict):

@@ -1,0 +1,25 @@
+﻿_defaults:
+  - "configs/models/vitdet_b_argoverse.yml"
+sparsity: 0.5
+margin: 0
+period: 8
+conf: 0.5
+_output: "results/train/vitdet_argoverse/${_name}/"
+weights: "weights/vitdet_b_vid.pth"
+optimizer: "AdamW"
+optimizer_kwargs:
+  lr: 1.0e-5
+  weight_decay: 0.1
+lr_scheduler_kwargs:
+  min_lr: 1.0e-7
+  warmup_epochs: 5
+accum_iter: 8
+epochs: 10
+mask: None
+evaluate: False
+nb_classes: 8
+dataset:
+  root: "./data/argoversehd"
+  train_split: "train"
+  split: "val"
+  annotations: "./data/argoversehd/Argoverse-HD/annotations/val.json"
