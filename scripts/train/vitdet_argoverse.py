@@ -42,7 +42,6 @@ def train_pass(config, device, epoch, model, optimizer, lr_sched, data, tensorbo
     accum_iter = config["accum_iter"]
     for _, vid_item in tqdm(zip(range(n_items), data), total=n_items, ncols=0):
         vid_item = DataLoader(vid_item, batch_size=1, collate_fn=collate_fn)
-        model.reset()
         for frame, annotations in vid_item:
             step += 1
             annotation_list = []
