@@ -45,19 +45,16 @@ def train_pass(config, device, epoch, model, optimizer, lr_sched, data, tensorbo
         model.reset()
         for frame, annotations in vid_item:
             step += 1
+            annotation_list = []
             gt_instances = []
-            for ann in annotations:
-                annotation_list = []
-                ann_boxes = ann["boxes"]
-                ann_labels = ann["labels"]
-                for i in range(len(ann_boxes)):
-                    annotation_list.append(
-                        {
-                            "bbox": ann_boxes[i],
-                            "category_id": ann_labels[i],
-                            "bbox_mode": BoxMode.XYXY_ABS,
-                        }
-                    )
+            for annotation in annotations:
+                for i, bbox in enumerate(annotation["boxes"]):
+                    annotation_dict = {
+                        "bbox": bbox,
+                        "category_id": annotation["labels"][i],
+                        "bbox_mode": BoxMode.XYXY_ABS,
+                    }
+                    annotation_list.append(annotation_dict)
                 gt_instance = annotations_to_instances(
                     annotation_list, frame.shape[-2:], frame.shape[-2:]
                 )
