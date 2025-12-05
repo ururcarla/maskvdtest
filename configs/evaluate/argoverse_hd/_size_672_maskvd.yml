@@ -1,5 +1,0 @@
-_defaults:
-  - "_base_maskvd.yml"
-model:
-  input_shape: [3, 672, 672]
-

@@ -1,0 +1,15 @@
+_defaults:
+  - "_size_672.yml"
+dataset:
+  name: "argoverse"
+  train_split: "train"
+  val_split: "val"
+  args:
+    argoverse:
+      img_root: "./data/argoverse/Argoverse-1.1/tracking"
+      ann_files:
+        train: "./data/argoverse/Argoverse-HD/annotations/train.json"
+        val: "./data/argoverse/Argoverse-HD/annotations/val.json"
+model:
+  classes: 8
+

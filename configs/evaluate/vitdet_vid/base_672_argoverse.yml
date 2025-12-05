@@ -1,0 +1,14 @@
+_defaults:
+  - "_size_672.yml"
+dataset:
+  name: "argoverse"
+  split: "val"
+  args:
+    argoverse:
+      img_root: "./data/argoverse/Argoverse-1.1/tracking"
+      ann_files:
+        val: "./data/argoverse/Argoverse-HD/annotations/val.json"
+model:
+  classes: 8
+weights: "results/train/vitdet_vid_baseline/base_672_argoverse/weights_final.pth"
+
