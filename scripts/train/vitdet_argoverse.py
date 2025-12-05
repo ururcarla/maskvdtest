@@ -91,7 +91,8 @@ def train_pass(config, device, epoch, model, optimizer, lr_sched, data, tensorbo
 
             losses = {**detector_losses, **proposal_losses}
             loss = sum(losses.values())
-            loss.backward()
+            # Argoverse 训练会在 Video item 内多次复用模块缓存，需保留计算图
+            loss.backward(retain_graph=True)
             total_loss += loss.item()
 
             if step % accum_iter == 0:
