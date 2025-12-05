@@ -31,18 +31,6 @@ def collate_fn(batch):
     return frames, annotations
 
 
-def _estimate_total_frames(dataset, n_items):
-    video_info = getattr(dataset, "video_info", None)
-    if not video_info:
-        return max(len(dataset), n_items)
-    total = 0
-    limit = min(n_items, len(video_info))
-    for idx in range(limit):
-        frames = video_info[idx].get("frames")
-        total += len(frames) if isinstance(frames, list) else 0
-    return max(total, n_items)
-
-
 def build_datasets(config):
     dataset_cfg = config.get("dataset") or {}
     if not dataset_cfg:
@@ -60,13 +48,12 @@ def train_pass(config, device, epoch, model, optimizer, lr_sched, data, tensorbo
     n_items = config.get("n_items", len(data))
     accum_iter = config["accum_iter"]
     total_loss = 0.0
-    frames_processed = 0
-    total_frames = _estimate_total_frames(data, n_items)
+    step = 0
 
     for _, vid_item in tqdm(zip(range(n_items), data), total=n_items, ncols=0):
         vid_loader = DataLoader(vid_item, batch_size=1, collate_fn=collate_fn)
         for frame, annotations in vid_loader:
-            frames_processed += 1
+            step += 1
             annotation_list = []
             gt_instances = []
             for annotation in annotations:
@@ -83,10 +70,8 @@ def train_pass(config, device, epoch, model, optimizer, lr_sched, data, tensorbo
                 )
                 gt_instances.append(gt_instance.to(device))
 
-            if frames_processed % accum_iter == 0:
-                progress = min(1.0, frames_processed / max(total_frames, 1))
-                epoch_position = (epoch - 1) + progress
-                lr_sched.adjust_learning_rate(epoch_position)
+            if step % accum_iter == 0:
+                lr_sched.adjust_learning_rate(step / n_items + epoch - 1)
 
             with EventStorage():
                 images, x = model.pre_backbone(frame.to(device))
@@ -110,16 +95,16 @@ def train_pass(config, device, epoch, model, optimizer, lr_sched, data, tensorbo
             loss.backward(retain_graph=True)
             total_loss += loss.item()
 
-            if frames_processed % accum_iter == 0:
+            if step % accum_iter == 0:
                 tee_print(
-                    f"Loss: {total_loss / frames_processed:.6f}, lr: {optimizer.param_groups[0]['lr']:.6e}",
+                    f"Loss: {total_loss / step:.6f}, lr: {optimizer.param_groups[0]['lr']:.6e}",
                     output_file,
                 )
                 optimizer.step()
                 optimizer.zero_grad()
 
             if tensorboard is not None:
-                tensorboard.add_scalar("train/loss", loss.item(), global_step=frames_processed)
+                tensorboard.add_scalar("train/loss", loss.item(), global_step=step)
 
 
 def val_pass(device, model, data, config):
