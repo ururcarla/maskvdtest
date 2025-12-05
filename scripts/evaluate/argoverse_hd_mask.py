@@ -250,7 +250,13 @@ def main():
     # Load and set up the model.
     config["model"]["mask"] = True
     model = ViTDet(**(config["model"]))
-    msg = model.load_state_dict(torch.load(config["weights"]), strict=False)
+    ckpt = torch.load(config["weights"])
+    for key in list(ckpt.keys()):
+        if key.startswith("roi_heads.box_predictor.cls_score") or key.startswith(
+            "roi_heads.box_predictor.bbox_pred"
+        ):
+            del ckpt[key]
+    msg = model.load_state_dict(ckpt, strict=False)
     tee_print(msg, output_file)
     # tee_print(f"Keep rate:{model.backbone.keep_rate}", output_file)
     

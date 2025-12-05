@@ -115,7 +115,7 @@ def val_pass(device, model, data, config):
             with torch.inference_mode():
                 results = model(frame.to(device))
                 outputs.extend(results)
-            labels.extend([dict_to_device(annotation, device) for annotation in annotations])
+                labels.extend([dict_to_device(annotation, device) for annotation in annotations])
 
     # for _, vid_item in tqdm(zip(range(n_items), data), total=n_items, ncols=0):
     #     count += 1
