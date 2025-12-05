@@ -22,8 +22,10 @@ class LR_Scheduler:
         else:
             # step decay after warmup
             # lr = self.lr * pow(lr_decay, math.floor(epoch - self.warmup_epochs))
+            decay_span = max(self.epochs - self.warmup_epochs, 1e-6)
+            progress = max(0.0, min(1.0, (epoch - self.warmup_epochs) / decay_span))
             lr = self.min_lr + (self.lr - self.min_lr) * 0.5 * \
-                (1. + math.cos(math.pi * (epoch - self.warmup_epochs) / (self.epochs - self.warmup_epochs)))
+                (1. + math.cos(math.pi * progress))
         for param_group in self.optimizer.param_groups:
             if "lr_scale" in param_group:
                 param_group["lr"] = lr * param_group["lr_scale"]

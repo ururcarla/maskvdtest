@@ -128,8 +128,18 @@ def val_pass(device, model, data, config):
         for frame, annotations in vid_loader:
             with torch.inference_mode():
                 results, _ = model(frame.to(device), mask_index)
-                outputs.extend(results)
-            labels.extend([dict_to_device(annotation, device) for annotation in annotations])
+            pred_batch = list(results)
+            label_batch = [dict_to_device(annotation, device) for annotation in annotations]
+            if len(pred_batch) != len(label_batch):
+                min_len = min(len(pred_batch), len(label_batch))
+                print(
+                    f"[val_pass] Warning: preds ({len(pred_batch)}) and targets ({len(label_batch)}) length mismatch. "
+                    f"Truncating to {min_len}."
+                )
+                pred_batch = pred_batch[:min_len]
+                label_batch = label_batch[:min_len]
+            outputs.extend(pred_batch)
+            labels.extend(label_batch)
 
     mean_ap = MeanAveragePrecision()
     if outputs:
