@@ -32,7 +32,6 @@ from util.lr_sched import LR_Scheduler
 from torchprofile import profile_macs
 import numpy as np
 from utils.image import pad_to_size, rescale
-import supervision as sv
 
 
 def collate_fn(batch):
@@ -80,6 +79,30 @@ def get_region_mask_static(short_edge_length, max_size, region_size=16, region_s
     index = topkmask(y, sparsity=region_sparsity)
     # scores = y.flatten(1).softmax(1)
     return index
+
+
+def get_region_mask_dynamic(results, image_shape, conf_threshold=0.5, region_size=16, margin=0):
+    mask = torch.zeros(image_shape)
+    has_box = False
+    for result in results:
+        for i, bbox in enumerate(result['boxes']):
+            if result['scores'][i] > conf_threshold:
+                has_box = True
+                x1, y1, x2, y2 = bbox
+                x1 = max(0, int(x1) - margin)
+                y1 = max(0, int(y1) - margin)
+                x2 = min(image_shape[1], int(x2) + margin)
+                y2 = min(image_shape[0], int(y2) + margin)
+                if x2 <= x1 or y2 <= y1:
+                    continue
+                mask[y1:y2, x1:x2] = 1
+    if not has_box:
+        mask = torch.ones(image_shape)
+    weight = torch.ones(1, 1, region_size, region_size)
+    y = F.conv2d(mask.unsqueeze(0).unsqueeze(0), weight, stride=region_size)
+    mask_index = torch.nonzero(y.flatten() > 0).reshape(1, -1)
+    sparsity = 1 - mask_index.shape[1] / y.numel()
+    return mask_index, sparsity, y.numel()
 
 
 class SlidingWindowHeatmap:
@@ -171,82 +194,6 @@ def merge_mask_indices(*indices):
     return unique.unsqueeze(0)
 
 
-def get_region_mask_from_tracks(tracked, image_shape, region_size=16, margin=0):
-    if tracked is None or len(tracked) == 0 or getattr(tracked, "xyxy", None) is None:
-        return None
-
-    height, width = image_shape
-    mask = torch.zeros((height, width), dtype=torch.float32)
-    boxes = tracked.xyxy
-    margin = int(max(margin, 0))
-
-    for bbox in boxes:
-        x1, y1, x2, y2 = bbox
-        x1 = max(0, int(np.floor(x1)) - margin)
-        y1 = max(0, int(np.floor(y1)) - margin)
-        x2 = min(width, int(np.ceil(x2)) + margin)
-        y2 = min(height, int(np.ceil(y2)) + margin)
-        if x2 <= x1 or y2 <= y1:
-            continue
-        mask[y1:y2, x1:x2] = 1
-
-    if torch.count_nonzero(mask) == 0:
-        return None
-
-    weight = torch.ones(1, 1, region_size, region_size)
-    y = F.conv2d(mask.unsqueeze(0).unsqueeze(0), weight, stride=region_size)
-    mask_index = torch.nonzero(y.flatten() > 0)
-    if mask_index.numel() == 0:
-        return None
-    return mask_index.reshape(1, -1)
-
-def results_to_supervision_detections(result):
-    boxes = result["boxes"].detach()
-    if boxes.numel() == 0:
-        detections = sv.Detections.empty()
-        detections.confidence = np.empty((0,), dtype=np.float32)
-        detections.class_id = np.empty((0,), dtype=np.int64)
-        return detections
-    scores = result["scores"].detach()
-    class_ids = result["labels"].detach()
-
-    results = torch.cat((boxes, scores.unsqueeze(-1), class_ids.unsqueeze(-1)), dim=1).cpu().numpy()
-
-    boxes = results[:, :4]
-    scores = results[:, 4]
-    class_ids = results[:, 5].astype(np.int64, copy=False)
-    
-    return sv.Detections(
-        xyxy=boxes,
-        confidence=scores,
-        class_id=class_ids,
-    )
-
-
-def detections_to_result_dict(detections, device):
-    if len(detections) == 0:
-        boxes = torch.empty((0, 4), device=device)
-        scores = torch.empty((0,), device=device)
-        labels = torch.empty((0,), dtype=torch.int64, device=device)
-    else:
-        boxes = torch.as_tensor(detections.xyxy, dtype=torch.float32, device=device)
-        conf = detections.confidence
-        if conf is None:
-            conf = np.ones(len(detections), dtype=np.float32)
-        scores = torch.as_tensor(conf, dtype=torch.float32, device=device)
-        cls = detections.class_id
-        if cls is None:
-            cls = np.zeros(len(detections), dtype=np.int64)
-        labels = torch.as_tensor(cls, dtype=torch.int64, device=device)
-    result = {"boxes": boxes, "scores": scores, "labels": labels}
-    if getattr(detections, "tracker_id", None) is not None:
-        tracker_ids = torch.as_tensor(
-            detections.tracker_id, dtype=torch.int64, device=device
-        )
-        result["track_ids"] = tracker_ids
-    return result
-
-    
 def val_pass(device, model, data, config, output_file):
     model.counting()
     model.clear_counts()
@@ -257,7 +204,6 @@ def val_pass(device, model, data, config, output_file):
     total_sparsity = 0 
     model_latency = 0
     system_latency = 0
-    tracker_latency = 0
     memory = 0
     n_items = config.get("n_items", len(data))
     count = 0
@@ -282,37 +228,22 @@ def val_pass(device, model, data, config, output_file):
                                                max_size=max_size,
                                                region_sparsity=1 - config["sparsity"]) # sparsity is keep rate 
 
-    tracker_cfg = config.get("tracker", {})
-    tracker = sv.ByteTrack(
-        track_activation_threshold=tracker_cfg.get(
-            "track_activation_threshold", 0.5
-        ),
-        lost_track_buffer=tracker_cfg.get("lost_track_buffer", 30),
-        minimum_matching_threshold=tracker_cfg.get(
-            "minimum_matching_threshold", 0.8
-        ),
-        frame_rate=tracker_cfg.get("frame_rate", config.get("frame_rate", 30)),
-        minimum_consecutive_frames=tracker_cfg.get(
-            "minimum_consecutive_frames", 1
-        ),
-    )
     region_size = config.get("region_size", 16)
     total_region_tokens = (
         (img_shape[0] // region_size) * (img_shape[1] // region_size)
     )
-    mask_index_static_device = mask_index_static.to(device)
     dynamic_window = int(config.get("dynamic_heatmap_window", 30))
     dynamic_min_frames = int(config.get("dynamic_heatmap_min_frames", max(1, min(dynamic_window, 30))))
     dynamic_min_activity = float(config.get("dynamic_heatmap_min_activity", 0.0))
     dynamic_score_threshold = float(config.get("dynamic_heatmap_score_threshold", 0.75))
-    mask_margin = int(config.get("tracker_mask_margin", config.get("margin", 0)))
+    dynamic_conf_threshold = float(config.get("conf", 0.5))
+    dynamic_margin = int(config.get("margin", 0))
 
     for _, vid_item in tqdm(zip(range(n_items), data), total=n_items, ncols=0):
         vid_item = DataLoader(vid_item, batch_size=1, collate_fn=collate_fn)
         step = 0
         n_frames += len(vid_item)
         model.reset()
-        tracker.reset()
         heatmap_state = SlidingWindowHeatmap(
             image_shape=tuple(img_shape),
             region_size=region_size,
@@ -320,28 +251,43 @@ def val_pass(device, model, data, config, output_file):
             score_threshold=dynamic_score_threshold,
         )
         heatmap_mask_cache = None
-        tracker_mask_cache = None
+        prev_results = None
         for frame, annotations in vid_item:
             with torch.inference_mode():
                 is_key_frame = (step % config["period"]) == 0
+                dynamic_mask = None
+                if not is_key_frame and prev_results is not None:
+                    dynamic_mask, _, _ = get_region_mask_dynamic(
+                        prev_results,
+                        image_shape=img_shape,
+                        conf_threshold=dynamic_conf_threshold,
+                        region_size=region_size,
+                        margin=dynamic_margin,
+                    )
+
                 if is_key_frame:
                     mask_index = None
                     sparsity = 0
                 else:
-                    combined_mask = merge_mask_indices(heatmap_mask_cache, tracker_mask_cache)
-                    mask_index = combined_mask
-                    if mask_index is not None:
-                        keep_rate = mask_index.shape[1] / total_region_tokens
-                        mask_index = mask_index.to(device)
-                        sparsity = 1 - keep_rate
-                    elif config["sparsity"] < 1.0:
-                        mask_index = mask_index_static_device
-                        keep_rate = mask_index.shape[1] / total_region_tokens
+                    mask_candidates = []
+                    if dynamic_mask is not None:
+                        mask_candidates.append(dynamic_mask)
+                    if heatmap_mask_cache is not None:
+                        mask_candidates.append(heatmap_mask_cache)
+                    if config["sparsity"] < 1.0:
+                        mask_candidates.append(mask_index_static)
+
+                    combined_mask = (
+                        merge_mask_indices(*mask_candidates) if mask_candidates else None
+                    )
+                    if combined_mask is not None:
+                        keep_rate = combined_mask.shape[1] / total_region_tokens
+                        mask_index = combined_mask.to(device)
                         sparsity = 1 - keep_rate
                     else:
                         mask_index = None
                         sparsity = 0
-               
+
                 system_start = perf_counter()
                 starter.record()
                 results, _ = model(frame.to(device), mask_index)
@@ -349,15 +295,9 @@ def val_pass(device, model, data, config, output_file):
                 torch.cuda.synchronize()
                 curr_time = starter.elapsed_time(ender)
 
-                detections = results_to_supervision_detections(results[0])
-                tracker_start = perf_counter()
-                tracked = tracker.update_with_detections(detections)
-                tracker_latency += (perf_counter() - tracker_start) * 1000
                 system_latency += (perf_counter() - system_start) * 1000
-                if is_key_frame:
-                    outputs.extend(results)
-                else:
-                    outputs.append(detections_to_result_dict(tracked, device))
+                outputs.extend(results)
+                prev_results = results
                 frame_results = results[0]
                 heatmap_state.update(
                     frame_results["boxes"],
@@ -370,13 +310,6 @@ def val_pass(device, model, data, config, output_file):
                 )
                 heatmap_mask_cache = heatmap_mask.cpu() if heatmap_mask is not None else None
 
-                tracker_mask = get_region_mask_from_tracks(
-                    tracked,
-                    image_shape=tuple(img_shape),
-                    region_size=region_size,
-                    margin=mask_margin,
-                )
-                tracker_mask_cache = tracker_mask.cpu() if tracker_mask is not None else None
                 step += 1
                 count += 1
                 total_sparsity += sparsity
@@ -392,7 +325,6 @@ def val_pass(device, model, data, config, output_file):
     tee_print(f'Sparsity: {total_sparsity / count}', output_file)
     tee_print(f'Model latency (GPU): {model_latency / count} ms', output_file)
     tee_print(f'System latency: {system_latency / count} ms', output_file)
-    tee_print(f'Tracker latency: {tracker_latency / count} ms', output_file)
     tee_print(f'Memory: {memory / count} MB', output_file)
     if config["model"]["backbone_config"]["backbone"] == "windowed":
         tee_print(f'GFLOPs: {sum([value for _, value in counts.items()]) / 1e9}', output_file)
