@@ -43,6 +43,73 @@ def _estimate_total_frames(dataset, n_items):
     return max(total, n_items)
 
 
+def _set_backbone_trainable(model, module_names, trainable):
+    for module_name in module_names:
+        module = getattr(model, module_name, None)
+        if module is None:
+            continue
+        for param in module.parameters():
+            param.requires_grad = trainable
+
+
+def _collect_head_param_groups(model):
+    param_groups = []
+    for module_name in ["pyramid", "proposal_generator", "roi_heads"]:
+        module = getattr(model, module_name, None)
+        if module is None:
+            continue
+        params = list(module.parameters())
+        if not params:
+            continue
+        param_groups.append({"params": params})
+    return param_groups
+
+
+def _merge_dict(base, overrides):
+    merged = dict(base)
+    if overrides:
+        merged.update(overrides)
+    return merged
+
+
+def _build_training_stages(config):
+    head_cfg = config.get("head_training") or {}
+    freeze_modules = head_cfg.get("freeze_modules") or ["preprocessing", "embedding", "backbone"]
+    total_epochs = int(config.get("epochs", 0))
+    stages = []
+
+    head_epochs = int(head_cfg.get("head_epochs", 0) or 0)
+    head_epochs = max(0, min(head_epochs, total_epochs))
+    if head_epochs > 0:
+        stages.append(
+            {
+                "name": "head",
+                "type": "head",
+                "epochs": head_epochs,
+                "train_backbone": False,
+                "freeze_modules": freeze_modules,
+                "optimizer_overrides": head_cfg.get("head_optimizer_kwargs"),
+                "lr_overrides": head_cfg.get("head_lr_scheduler_kwargs"),
+            }
+        )
+
+    remaining_epochs = total_epochs - sum(stage["epochs"] for stage in stages)
+    if remaining_epochs > 0:
+        stages.append(
+            {
+                "name": "full",
+                "type": "full",
+                "epochs": remaining_epochs,
+                "train_backbone": True,
+                "freeze_modules": freeze_modules,
+                "optimizer_overrides": head_cfg.get("full_optimizer_kwargs"),
+                "lr_overrides": head_cfg.get("full_lr_scheduler_kwargs"),
+            }
+        )
+
+    return stages
+
+
 def build_datasets(config):
     dataset_cfg = config.get("dataset") or {}
     if not dataset_cfg:
@@ -166,16 +233,11 @@ def val_pass(device, model, data, config):
 
 
 def train_vitdet(config, model, device, train_data, val_data, output_file):
-    optimizer_class = getattr(optim, config["optimizer"])
-    optimizer = optimizer_class(model.parameters(), **config["optimizer_kwargs"])
-    lr_sched = LR_Scheduler(
-        optimizer,
-        config["lr_scheduler_kwargs"]["warmup_epochs"],
-        config["lr_scheduler_kwargs"]["min_lr"],
-        config["optimizer_kwargs"]["lr"],
-        config["epochs"],
-    )
-
+    stages = _build_training_stages(config)
+    total_epochs = sum(stage["epochs"] for stage in stages)
+    if total_epochs == 0:
+        tee_print("配置的训练 epoch 数为 0，跳过训练。", output_file)
+        return
     if "tensorboard" in config:
         base_name = config["tensorboard"]
         now_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -183,24 +245,67 @@ def train_vitdet(config, model, device, train_data, val_data, output_file):
     else:
         tensorboard = None
 
-    n_epochs = config["epochs"]
-    for epoch in range(n_epochs):
-        tee_print(f"\nEpoch {epoch + 1}/{n_epochs}", file=output_file)
-        train_pass(config, device, epoch + 1, model, optimizer, lr_sched, train_data, tensorboard, output_file)
-        results = val_pass(device, model, val_data, config)
-        model.reset()
+    optimizer_class = getattr(optim, config["optimizer"])
+    completed_epochs = 0
+    for stage_idx, stage in enumerate(stages, start=1):
+        tee_print(
+            f"\n[Stage {stage_idx}] {stage['name']} 阶段，训练 {stage['epochs']} 个 epoch",
+            file=output_file,
+        )
+        _set_backbone_trainable(model, stage["freeze_modules"], stage["train_backbone"])
 
-        if isinstance(results, dict):
-            for key, val in results.items():
-                tee_print(key.capitalize(), output_file)
-                tee_print(dict_string(val), output_file)
+        optimizer_kwargs = _merge_dict(config["optimizer_kwargs"], stage["optimizer_overrides"])
+        lr_sched_kwargs = _merge_dict(config["lr_scheduler_kwargs"], stage["lr_overrides"])
+
+        if stage["type"] == "head":
+            params = _collect_head_param_groups(model)
+            if not params:
+                params = [{"params": [p for p in model.parameters() if p.requires_grad]}]
         else:
-            tee_print(results, output_file)
-        tee_print("", output_file)
+            params = model.parameters()
 
-        weight_path = Path(config["_output"]) / f"weights_epoch_{epoch + 1}.pth"
-        torch.save(model.state_dict(), weight_path)
-        tee_print(f"Saved weights to {weight_path}", output_file)
+        optimizer = optimizer_class(params, **optimizer_kwargs)
+        lr_sched = LR_Scheduler(
+            optimizer,
+            lr_sched_kwargs["warmup_epochs"],
+            lr_sched_kwargs["min_lr"],
+            optimizer_kwargs["lr"],
+            stage["epochs"],
+        )
+
+        for local_epoch in range(stage["epochs"]):
+            global_epoch = completed_epochs + local_epoch + 1
+            tee_print(
+                f"\nEpoch {global_epoch}/{total_epochs} (stage: {stage['name']})",
+                file=output_file,
+            )
+            train_pass(
+                config,
+                device,
+                local_epoch + 1,
+                model,
+                optimizer,
+                lr_sched,
+                train_data,
+                tensorboard,
+                output_file,
+            )
+            results = val_pass(device, model, val_data, config)
+            model.reset()
+
+            if isinstance(results, dict):
+                for key, val in results.items():
+                    tee_print(key.capitalize(), output_file)
+                    tee_print(dict_string(val), output_file)
+            else:
+                tee_print(results, output_file)
+            tee_print("", output_file)
+
+            weight_path = Path(config["_output"]) / f"weights_epoch_{global_epoch}.pth"
+            torch.save(model.state_dict(), weight_path)
+            tee_print(f"Saved weights to {weight_path}", output_file)
+
+        completed_epochs += stage["epochs"]
 
     if tensorboard is not None:
         tensorboard.close()

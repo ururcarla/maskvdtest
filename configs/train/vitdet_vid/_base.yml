@@ -22,3 +22,10 @@ accum_iter: 8
 epochs: 50
 mask: None
 evaluate: False
+head_training:
+  head_epochs: 0
+  freeze_modules: ["preprocessing", "embedding", "backbone"]
+  head_optimizer_kwargs: {}
+  head_lr_scheduler_kwargs: {}
+  full_optimizer_kwargs: {}
+  full_lr_scheduler_kwargs: {}
