@@ -188,6 +188,7 @@ def train_vitdet(config, model, device, train_data, val_data, output_file):
         tee_print(f"\nEpoch {epoch + 1}/{n_epochs}", file=output_file)
         train_pass(config, device, epoch + 1, model, optimizer, lr_sched, train_data, tensorboard, output_file)
         results = val_pass(device, model, val_data, config)
+        model.reset()
 
         if isinstance(results, dict):
             for key, val in results.items():
