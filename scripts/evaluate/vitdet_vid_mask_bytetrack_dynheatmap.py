@@ -274,8 +274,8 @@ def val_pass(device, model, data, config, output_file):
                         mask_candidates.append(dynamic_mask)
                     if heatmap_mask_cache is not None:
                         mask_candidates.append(heatmap_mask_cache)
-                    if config["sparsity"] < 1.0:
-                        mask_candidates.append(mask_index_static)
+                    # if config["sparsity"] < 1.0:
+                    #     mask_candidates.append(mask_index_static)
 
                     combined_mask = (
                         merge_mask_indices(*mask_candidates) if mask_candidates else None
