@@ -19,6 +19,7 @@ lr_scheduler_kwargs:
   min_lr: 1.0e-7
   warmup_epochs: 1
 accum_iter: 8
+dataloader_workers: 8
 epochs: 5
 mask: None
 evaluate: False

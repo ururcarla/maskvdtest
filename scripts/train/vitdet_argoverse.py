@@ -8,6 +8,7 @@ project_root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 import torch
+from torch.cuda.amp import GradScaler, autocast
 from detectron2.data.detection_utils import annotations_to_instances, BoxMode
 from detectron2.utils.events import EventStorage
 from torch import optim
@@ -122,18 +123,33 @@ def build_datasets(config):
     return train_data, val_data
 
 
-def train_pass(config, device, epoch, model, optimizer, lr_sched, data, tensorboard, output_file):
+def train_pass(
+    config, device, stage_name, local_epoch, global_epoch, model, optimizer, lr_sched, data, tensorboard, scaler
+):
     model.train()
     n_items = config.get("n_items", len(data))
     accum_iter = config["accum_iter"]
-    total_loss = 0.0
     frames_processed = 0
     total_frames = _estimate_total_frames(data, n_items)
+    num_workers = config.get("dataloader_workers", 8)
+    pin_memory = isinstance(device, str) and device.startswith("cuda")
+    amp_enabled = scaler.is_enabled() if scaler is not None else False
+    optimizer.zero_grad()
 
-    for _, vid_item in tqdm(zip(range(n_items), data), total=n_items, ncols=0):
-        vid_loader = DataLoader(vid_item, batch_size=1, collate_fn=collate_fn)
+    for vid_idx, vid_item in tqdm(zip(range(n_items), data), total=n_items, ncols=0):
+        vid_loader = DataLoader(
+            vid_item,
+            batch_size=1,
+            collate_fn=collate_fn,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=num_workers > 0,
+        )
+        video_loss = 0.0
+        video_frames = 0
         for frame, annotations in vid_loader:
             frames_processed += 1
+            video_frames += 1
             annotation_list = []
             gt_instances = []
             for annotation in annotations:
@@ -152,41 +168,48 @@ def train_pass(config, device, epoch, model, optimizer, lr_sched, data, tensorbo
 
             if frames_processed % accum_iter == 0:
                 progress = min(1.0, frames_processed / max(total_frames, 1))
-                epoch_position = (epoch - 1) + progress
+                epoch_position = (local_epoch - 1) + progress
                 lr_sched.adjust_learning_rate(epoch_position)
 
             with EventStorage():
-                images, x = model.pre_backbone(frame.to(device))
-                if config["mask"] == "static":
-                    mask_index, _ = model.get_region_mask_static(
-                        region_sparsity=1 - config["sparsity"]
-                    )
-                    x = model.backbone(x, mask_id=mask_index)
-                else:
-                    x = model.backbone(x)
-                x = x.transpose(-1, -2)
-                x = x.view(x.shape[:-1] + model.backbone_input_size)
-                x = model.pyramid(x)
-                x = dict(zip(model.proposal_generator.in_features, x))
-                proposals, proposal_losses = model.proposal_generator(images, x, gt_instances)
-                _, detector_losses = model.roi_heads(images, x, proposals, gt_instances)
+                with autocast(enabled=amp_enabled):
+                    images, x = model.pre_backbone(frame.to(device))
+                    if config["mask"] == "static":
+                        mask_index, _ = model.get_region_mask_static(
+                            region_sparsity=1 - config["sparsity"]
+                        )
+                        x = model.backbone(x, mask_id=mask_index)
+                    else:
+                        x = model.backbone(x)
+                    x = x.transpose(-1, -2)
+                    x = x.view(x.shape[:-1] + model.backbone_input_size)
+                    x = model.pyramid(x)
+                    x = dict(zip(model.proposal_generator.in_features, x))
+                    proposals, proposal_losses = model.proposal_generator(images, x, gt_instances)
+                    _, detector_losses = model.roi_heads(images, x, proposals, gt_instances)
 
-            losses = {**detector_losses, **proposal_losses}
-            loss = sum(losses.values())
+                    losses = {**detector_losses, **proposal_losses}
+                    loss = sum(losses.values())
             # Argoverse 训练会在 Video item 内多次复用模块缓存，需保留计算图
-            loss.backward(retain_graph=True)
-            total_loss += loss.item()
+            loss_value = loss.item()
+            video_loss += loss_value
+            scaler.scale(loss).backward(retain_graph=True)
 
             if frames_processed % accum_iter == 0:
-                tee_print(
-                    f"Loss: {total_loss / frames_processed:.6f}, lr: {optimizer.param_groups[0]['lr']:.6e}",
-                    output_file,
-                )
-                optimizer.step()
+                scaler.step(optimizer)
+                scaler.update()
                 optimizer.zero_grad()
 
             if tensorboard is not None:
                 tensorboard.add_scalar("train/loss", loss.item(), global_step=frames_processed)
+
+        avg_video_loss = video_loss / max(video_frames, 1)
+        current_lr = optimizer.param_groups[0]["lr"]
+        print(
+            f"[Train][Stage {stage_name}] Epoch {global_epoch} "
+            f"Video {vid_idx + 1}/{n_items} frames={video_frames} "
+            f"loss={avg_video_loss:.6f} lr={current_lr:.6e}"
+        )
 
 
 def val_pass(device, model, data, config):
@@ -197,9 +220,18 @@ def val_pass(device, model, data, config):
     outputs = []
     labels = []
     n_items = config.get("n_items", len(data))
+    num_workers = config.get("dataloader_workers", 8)
+    pin_memory = isinstance(device, str) and device.startswith("cuda")
 
     for _, vid_item in tqdm(zip(range(n_items), data), total=n_items, ncols=0):
-        vid_loader = DataLoader(vid_item, batch_size=1, collate_fn=collate_fn)
+        vid_loader = DataLoader(
+            vid_item,
+            batch_size=1,
+            collate_fn=collate_fn,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=num_workers > 0,
+        )
         n_frames += len(vid_loader)
         model.reset()
         if config["mask"] == "static":
@@ -236,7 +268,7 @@ def train_vitdet(config, model, device, train_data, val_data, output_file):
     stages = _build_training_stages(config)
     total_epochs = sum(stage["epochs"] for stage in stages)
     if total_epochs == 0:
-        tee_print("配置的训练 epoch 数为 0，跳过训练。", output_file)
+        print("配置的训练 epoch 数为 0，跳过训练。")
         return
     if "tensorboard" in config:
         base_name = config["tensorboard"]
@@ -246,12 +278,10 @@ def train_vitdet(config, model, device, train_data, val_data, output_file):
         tensorboard = None
 
     optimizer_class = getattr(optim, config["optimizer"])
+    use_amp = torch.cuda.is_available() and isinstance(device, str) and device.startswith("cuda")
     completed_epochs = 0
     for stage_idx, stage in enumerate(stages, start=1):
-        tee_print(
-            f"\n[Stage {stage_idx}] {stage['name']} 阶段，训练 {stage['epochs']} 个 epoch",
-            file=output_file,
-        )
+        print(f"\n[Stage {stage_idx}] {stage['name']} 阶段，训练 {stage['epochs']} 个 epoch")
         _set_backbone_trainable(model, stage["freeze_modules"], stage["train_backbone"])
 
         optimizer_kwargs = _merge_dict(config["optimizer_kwargs"], stage["optimizer_overrides"])
@@ -272,23 +302,23 @@ def train_vitdet(config, model, device, train_data, val_data, output_file):
             optimizer_kwargs["lr"],
             stage["epochs"],
         )
+        scaler = GradScaler(enabled=use_amp)
 
         for local_epoch in range(stage["epochs"]):
             global_epoch = completed_epochs + local_epoch + 1
-            tee_print(
-                f"\nEpoch {global_epoch}/{total_epochs} (stage: {stage['name']})",
-                file=output_file,
-            )
+            print(f"\nEpoch {global_epoch}/{total_epochs} (stage: {stage['name']})")
             train_pass(
                 config,
                 device,
+                stage["name"],
                 local_epoch + 1,
+                global_epoch,
                 model,
                 optimizer,
                 lr_sched,
                 train_data,
                 tensorboard,
-                output_file,
+                scaler,
             )
             results = val_pass(device, model, val_data, config)
             model.reset()
@@ -303,7 +333,7 @@ def train_vitdet(config, model, device, train_data, val_data, output_file):
 
             weight_path = Path(config["_output"]) / f"weights_epoch_{global_epoch}.pth"
             torch.save(model.state_dict(), weight_path)
-            tee_print(f"Saved weights to {weight_path}", output_file)
+            print(f"Saved weights to {weight_path}")
 
         completed_epochs += stage["epochs"]
 
@@ -312,7 +342,7 @@ def train_vitdet(config, model, device, train_data, val_data, output_file):
 
     final_path = Path(config["_output"]) / "weights_final.pth"
     torch.save(model.state_dict(), final_path)
-    tee_print(f"Saved weights to {final_path}", output_file)
+    print(f"Saved weights to {final_path}")
 
 
 def main():
@@ -335,11 +365,11 @@ def main():
         ):
             del ckpt[key]
     msg = model.load_state_dict(ckpt, strict=False)
-    tee_print(msg, output_file)
+    print(msg)
     model = model.to(device)
 
     if config.get("evaluate", False):
-        tee_print("Evaluating....", output_file)
+        print("Evaluating....")
         results = val_pass(device, model, val_data, config)
         if isinstance(results, dict):
             for key, val in results.items():
