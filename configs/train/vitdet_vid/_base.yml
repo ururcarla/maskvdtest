@@ -14,7 +14,7 @@ weights: "weights/vitdet_b_vid.pth"
 optimizer: "AdamW"
 optimizer_kwargs:
   lr: 1.0e-5
-  weight_decay: 0.1
+  weight_decay: 0.05
 lr_scheduler_kwargs:
   min_lr: 1.0e-7
   warmup_epochs: 1
@@ -26,10 +26,19 @@ evaluate: False
 head_training:
   head_epochs: 2
   freeze_modules: ["preprocessing", "embedding", "backbone"]
+  partial_epochs: 1
+  partial_backbone_blocks: [8, 9, 10, 11]
+  partial_backbone_lr: 1.0e-5
   head_optimizer_kwargs:
     lr: 1.0e-4
     weight_decay: 0.05
   head_lr_scheduler_kwargs:
+    min_lr: 1.0e-7
+    warmup_epochs: 1
+  partial_optimizer_kwargs:
+    lr: 5.0e-5
+    weight_decay: 0.05
+  partial_lr_scheduler_kwargs:
     min_lr: 1.0e-7
     warmup_epochs: 1
   full_optimizer_kwargs:
@@ -38,3 +47,4 @@ head_training:
   full_lr_scheduler_kwargs:
     min_lr: 1.0e-7
     warmup_epochs: 1
+  full_backbone_lr: 5.0e-6
