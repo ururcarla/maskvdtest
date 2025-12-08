@@ -237,11 +237,11 @@ def make_coco_transforms(image_set, default_res=None):
 
 
 def build(image_set, n_classes=7, args=None):
-    root = Path('/data1/kitti_tracking')
+    root = Path('./kitti')
     assert root.exists(), f'provided COCO path {root} does not exist'
     PATHS = {
-        "train": (root / 'data_tracking_image_2/training/image_02', root / "annotations_old" / f'tracking_train_half.json'),
-        "val": (root / 'data_tracking_image_2/training/image_02', root / "annotations_old" / f'tracking_val_half.json'),
+        "train": (root / 'data_tracking_image_2/training/image_02', root / "annotations" / f'tracking_train_half.json'),
+        "val": (root / 'data_tracking_image_2/training/image_02', root / "annotations" / f'tracking_val_half.json'),
     }
     img_folder, ann_file = PATHS[image_set]
     dataset = CocoDetection(img_folder, ann_file, n_classes=n_classes, transforms=make_coco_transforms(image_set, (672, 370)), return_masks=False)

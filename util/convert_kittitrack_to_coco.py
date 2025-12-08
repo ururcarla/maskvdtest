@@ -7,7 +7,7 @@ import json
 import numpy as np
 import os
 import cv2
-DATA_PATH = '/data1/kitti_tracking/'
+DATA_PATH = './kitti/'
 SPLITS = ['train_half', 'val_half', 'train', 'test']
 VIDEO_SETS = {'train': range(21), 'test': range(29), 
   'train_half': range(21), 'val_half': range(21)}
