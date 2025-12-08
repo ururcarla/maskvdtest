@@ -10,8 +10,8 @@ split: "vid_train"
 vanilla: false
 mask: None
 evaluate: False
-_output: "results/train/vitdet_argoverse_baseline/${_name}.pth/"
-output_weights: "results/train/vitdet_argoverse_baseline/weights_final.pth"
+_output: "results/train/vitdet_argoverse/"
+output_weights: "results/train/vitdet_argoverse/weights_final.pth"
 # weights: "results/train/vitdet_vid_baseline_lrsched_lr1e-5/base_672/weights_epoch_2.pth"
 weights: "weights/vitdet_b_vid.pth"
 
@@ -23,7 +23,7 @@ optimizer_kwargs:
 lr_scheduler_kwargs:
   min_lr: 1.0e-7
   warmup_epochs: 1
-epochs: 5
+epochs: 12
 accum_iter: 8
 dataloader_workers: 4
 
@@ -34,31 +34,34 @@ head_training:
   stages:
     - name: "head"
       description: "仅训练检测头"
-      epochs: 2
+      epochs: 5
       train_head: true
       train_backbone: false
       optimizer:
         lr: 1.0e-4
         weight_decay: 0.05
+      backbone:
+        lr: 1.0e-4
+        weight_decay: 0.05
       lr_scheduler:
         min_lr: 1.0e-7
-        warmup_epochs: 1
+        warmup_epochs: 2
 
     - name: "partial"
       description: "（可选）只解冻指定 backbone blocks"
-      epochs: 0                      # >0 时启用
+      epochs: 4                      # >0 时启用
       train_head: true
       train_backbone: true
       backbone_blocks: [8, 9, 10, 11]
       optimizer:
-        lr: 5.0e-5
+        lr: 1.0e-5
         weight_decay: 0.05
       backbone:
         lr: 1.0e-5
         weight_decay: 0.05
       lr_scheduler:
         min_lr: 1.0e-7
-        warmup_epochs: 1
+        warmup_epochs: 2
 
     - name: "full"
       description: "解冻全骨干并继续微调"
@@ -67,7 +70,7 @@ head_training:
       train_backbone: true
       backbone_blocks: "all"
       optimizer:
-        lr: 5.0e-5
+        lr: 5.0e-6
         weight_decay: 0.05
       backbone:
         lr: 5.0e-6
