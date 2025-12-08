@@ -104,8 +104,19 @@ def val_pass(device, model, data, config):
         if annotations['frame_id'] == 1:
             model.reset()
         with torch.inference_mode():
-            results = model(frame.to(device))
-            outputs.extend(results)
+            raw_results = model(frame.to(device))
+            if isinstance(raw_results, (list, tuple)):
+                if len(raw_results) == 0:
+                    empty_result = {
+                        "boxes": torch.zeros((0, 4), device=device),
+                        "scores": torch.zeros((0,), device=device),
+                        "labels": torch.zeros((0,), dtype=torch.int64, device=device),
+                    }
+                    outputs.append(empty_result)
+                else:
+                    outputs.append(raw_results[0])
+            else:
+                outputs.append(raw_results)
         labels.append(squeeze_dict(dict_to_device(annotations, device), dim=0))
 
     # for _, vid_item in tqdm(zip(range(n_items), data), total=n_items, ncols=0):
