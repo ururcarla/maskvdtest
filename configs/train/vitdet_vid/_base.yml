@@ -1,16 +1,21 @@
 _defaults:
   - "configs/models/vitdet_b_vid.yml"
+
+# --------- 数据/运行基础设置 ---------
 sparsity: 0.3
 margin: 0
 period: 8
 conf: 0.5
-# _output: "results/train/vitdet_vid_baseline_lrsched_step/${_name}/"
-_output: "results/train/vitdet_argoverse_baseline/${_name}.pth/"
-output_weights: "results/train/vitdet_argoverse_baseline/weights_final.pth"
 split: "vid_train"
 vanilla: false
+mask: None
+evaluate: False
+_output: "results/train/vitdet_argoverse_baseline/${_name}.pth/"
+output_weights: "results/train/vitdet_argoverse_baseline/weights_final.pth"
 # weights: "results/train/vitdet_vid_baseline_lrsched_lr1e-5/base_672/weights_epoch_2.pth"
 weights: "weights/vitdet_b_vid.pth"
+
+# --------- 优化与调度 ---------
 optimizer: "AdamW"
 optimizer_kwargs:
   lr: 1.0e-5
@@ -18,33 +23,55 @@ optimizer_kwargs:
 lr_scheduler_kwargs:
   min_lr: 1.0e-7
   warmup_epochs: 1
-accum_iter: 8
-dataloader_workers: 8
 epochs: 5
-mask: None
-evaluate: False
+accum_iter: 8
+dataloader_workers: 4
+
+# --------- 阶段化训练策略 ---------
 head_training:
-  head_epochs: 2
+  head_modules: ["pyramid", "proposal_generator", "roi_heads"]
   freeze_modules: ["preprocessing", "embedding", "backbone"]
-  partial_epochs: 1
-  partial_backbone_blocks: [8, 9, 10, 11]
-  partial_backbone_lr: 1.0e-5
-  head_optimizer_kwargs:
-    lr: 1.0e-4
-    weight_decay: 0.05
-  head_lr_scheduler_kwargs:
-    min_lr: 1.0e-7
-    warmup_epochs: 1
-  partial_optimizer_kwargs:
-    lr: 5.0e-5
-    weight_decay: 0.05
-  partial_lr_scheduler_kwargs:
-    min_lr: 1.0e-7
-    warmup_epochs: 1
-  full_optimizer_kwargs:
-    lr: 5.0e-5
-    weight_decay: 0.05
-  full_lr_scheduler_kwargs:
-    min_lr: 1.0e-7
-    warmup_epochs: 1
-  full_backbone_lr: 5.0e-6
+  stages:
+    - name: "head"
+      description: "仅训练检测头"
+      epochs: 2
+      train_head: true
+      train_backbone: false
+      optimizer:
+        lr: 1.0e-4
+        weight_decay: 0.05
+      lr_scheduler:
+        min_lr: 1.0e-7
+        warmup_epochs: 1
+
+    - name: "partial"
+      description: "（可选）只解冻指定 backbone blocks"
+      epochs: 0                      # >0 时启用
+      train_head: true
+      train_backbone: true
+      backbone_blocks: [8, 9, 10, 11]
+      optimizer:
+        lr: 5.0e-5
+        weight_decay: 0.05
+      backbone:
+        lr: 1.0e-5
+        weight_decay: 0.05
+      lr_scheduler:
+        min_lr: 1.0e-7
+        warmup_epochs: 1
+
+    - name: "full"
+      description: "解冻全骨干并继续微调"
+      epochs: 3
+      train_head: true
+      train_backbone: true
+      backbone_blocks: "all"
+      optimizer:
+        lr: 5.0e-5
+        weight_decay: 0.05
+      backbone:
+        lr: 5.0e-6
+        weight_decay: 0.05
+      lr_scheduler:
+        min_lr: 1.0e-7
+        warmup_epochs: 1

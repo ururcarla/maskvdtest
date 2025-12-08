@@ -79,19 +79,6 @@ def _set_backbone_blocks_trainable(model, block_indices, trainable):
                 param.requires_grad = trainable
 
 
-def _collect_head_param_groups(model):
-    param_groups = []
-    for module_name in ["pyramid", "proposal_generator", "roi_heads"]:
-        module = getattr(model, module_name, None)
-        if module is None:
-            continue
-        params = list(module.parameters())
-        if not params:
-            continue
-        param_groups.append({"params": params})
-    return param_groups
-
-
 def _merge_dict(base, overrides):
     merged = dict(base)
     if overrides:
@@ -99,125 +86,167 @@ def _merge_dict(base, overrides):
     return merged
 
 
-def _collect_stage_param_groups(model, stage):
+def _gather_module_params(model, module_names, seen_params):
+    params = []
+    for module_name in module_names:
+        module = getattr(model, module_name, None)
+        if module is None:
+            continue
+        for param in module.parameters():
+            param_id = id(param)
+            if param_id in seen_params:
+                continue
+            seen_params.add(param_id)
+            params.append(param)
+    return params
+
+
+def _build_optimizer_param_groups(model, head_cfg):
+    head_modules = head_cfg.get("head_modules") or ["pyramid", "proposal_generator", "roi_heads"]
+    freeze_modules = head_cfg.get("freeze_modules") or ["preprocessing", "embedding", "backbone"]
+
     param_groups = []
-    train_head = stage.get("train_head", True)
-    head_modules = stage.get("head_modules") or ["pyramid", "proposal_generator", "roi_heads"]
-    if train_head:
-        head_params = []
-        for module_name in head_modules:
-            module = getattr(model, module_name, None)
-            if module is None:
-                continue
-            head_params.extend(param for param in module.parameters() if param.requires_grad)
-        if head_params:
-            head_group = {"params": head_params}
-            if stage.get("head_lr") is not None:
-                head_group["lr"] = stage["head_lr"]
-            param_groups.append(head_group)
+    seen = set()
 
-    if stage.get("train_backbone"):
-        backbone_params = []
-        backbone = getattr(model, "backbone", None)
-        backbone_blocks = stage.get("backbone_blocks")
-        if backbone is not None:
-            if backbone_blocks and backbone_blocks != "all":
-                blocks = getattr(backbone, "blocks", None)
-                if blocks is not None and len(blocks) > 0:
-                    for idx in backbone_blocks:
-                        if isinstance(idx, int):
-                            block_idx = idx
-                            if block_idx < 0:
-                                block_idx = len(blocks) + block_idx
-                            if 0 <= block_idx < len(blocks):
-                                block = blocks[block_idx]
-                                backbone_params.extend(
-                                    param for param in block.parameters() if param.requires_grad
-                                )
-            else:
-                backbone_params.extend(param for param in backbone.parameters() if param.requires_grad)
-        for module_name in stage.get("backbone_extra_modules") or []:
-            module = getattr(model, module_name, None)
-            if module is None:
-                continue
-            backbone_params.extend(param for param in module.parameters() if param.requires_grad)
-        if backbone_params:
-            backbone_group = {"params": backbone_params}
-            if stage.get("backbone_lr") is not None:
-                backbone_group["lr"] = stage["backbone_lr"]
-            param_groups.append(backbone_group)
+    head_params = _gather_module_params(model, head_modules, seen)
+    if head_params:
+        param_groups.append({"name": "head", "params": head_params})
 
-    if not param_groups:
-        fallback_params = [param for param in model.parameters() if param.requires_grad]
-        if fallback_params:
-            param_groups.append({"params": fallback_params})
+    backbone_module_names = []
+    for module_name in freeze_modules:
+        if module_name not in backbone_module_names:
+            backbone_module_names.append(module_name)
+    backbone_params = _gather_module_params(model, backbone_module_names, seen)
+    if backbone_params:
+        param_groups.append({"name": "backbone", "params": backbone_params})
+
+    remaining = [param for param in model.parameters() if id(param) not in seen]
+    if remaining:
+        param_groups.append({"name": "other", "params": remaining})
+
     return param_groups
 
 
-def _build_training_stages(config):
-    head_cfg = config.get("head_training") or {}
+def _configure_optimizer_for_stage(optimizer, stage, base_optimizer_kwargs):
+    overrides = stage.get("optimizer_overrides") or {}
+    base_lr = overrides.get("lr", base_optimizer_kwargs.get("lr", 0.0))
+    base_wd = overrides.get("weight_decay", base_optimizer_kwargs.get("weight_decay", 0.0))
+
+    head_lr = stage.get("head_lr", overrides.get("lr", base_lr))
+    head_wd = stage.get("head_weight_decay", overrides.get("weight_decay", base_wd))
+    backbone_lr = stage.get("backbone_lr", base_lr)
+    backbone_wd = stage.get("backbone_weight_decay", base_wd)
+    other_lr = stage.get("other_lr", base_lr)
+    other_wd = stage.get("other_weight_decay", base_wd)
+
+    def _lr_scale(target_lr):
+        if base_lr == 0:
+            return 1.0
+        return target_lr / base_lr
+
+    for group in optimizer.param_groups:
+        name = group.get("name")
+        if name == "head":
+            group["lr_scale"] = _lr_scale(head_lr)
+            group["weight_decay"] = head_wd
+        elif name == "backbone":
+            group["lr_scale"] = _lr_scale(backbone_lr)
+            group["weight_decay"] = backbone_wd
+        else:
+            group["lr_scale"] = _lr_scale(other_lr)
+            group["weight_decay"] = other_wd
+        group["lr"] = base_lr * group.get("lr_scale", 1.0)
+
+    return base_lr if base_lr != 0 else base_optimizer_kwargs.get("lr", 0.0)
+
+
+def _build_training_stages(config, head_cfg):
     freeze_modules = head_cfg.get("freeze_modules") or ["preprocessing", "embedding", "backbone"]
     backbone_extra_modules = [module for module in freeze_modules if module != "backbone"]
+    stages_cfg = head_cfg.get("stages")
     total_epochs = int(config.get("epochs", 0))
     stages = []
+    consumed_epochs = 0
 
-    head_epochs = int(head_cfg.get("head_epochs", 0) or 0)
-    head_epochs = max(0, min(head_epochs, total_epochs))
-    if head_epochs > 0:
-        stages.append(
-            {
-                "name": "head",
-                "type": "head",
-                "epochs": head_epochs,
-                "train_head": True,
-                "train_backbone": False,
-                "freeze_modules": freeze_modules,
-                "backbone_blocks": None,
-                "backbone_extra_modules": backbone_extra_modules,
-                "optimizer_overrides": head_cfg.get("head_optimizer_kwargs"),
-                "lr_overrides": head_cfg.get("head_lr_scheduler_kwargs"),
-            }
-        )
+    def _append_stage(stage_cfg, default_name):
+        nonlocal consumed_epochs
+        max_epochs = max(0, total_epochs - consumed_epochs)
+        stage_epochs = int(stage_cfg.get("epochs", 0) or 0)
+        stage_epochs = max(0, min(stage_epochs, max_epochs))
+        if stage_epochs == 0:
+            return
 
-    consumed_epochs = sum(stage["epochs"] for stage in stages)
+        optimizer_cfg = stage_cfg.get("optimizer") or {}
+        backbone_opt_cfg = stage_cfg.get("backbone") or {}
+        lr_cfg = stage_cfg.get("lr_scheduler") or {}
 
-    partial_epochs = int(head_cfg.get("partial_epochs", 0) or 0)
-    partial_epochs = max(0, min(partial_epochs, total_epochs - consumed_epochs))
-    if partial_epochs > 0:
-        stages.append(
-            {
-                "name": "partial",
-                "type": "partial",
-                "epochs": partial_epochs,
-                "train_head": True,
-                "train_backbone": True,
-                "backbone_blocks": head_cfg.get("partial_backbone_blocks") or [],
-                "backbone_lr": head_cfg.get("partial_backbone_lr"),
-                "backbone_extra_modules": backbone_extra_modules,
-                "freeze_modules": freeze_modules,
-                "optimizer_overrides": head_cfg.get("partial_optimizer_kwargs"),
-                "lr_overrides": head_cfg.get("partial_lr_scheduler_kwargs"),
-            }
-        )
-        consumed_epochs += partial_epochs
+        stage = {
+            "name": stage_cfg.get("name", default_name),
+            "type": stage_cfg.get("name", default_name),
+            "description": stage_cfg.get("description"),
+            "epochs": stage_epochs,
+            "train_head": stage_cfg.get("train_head", True),
+            "train_backbone": stage_cfg.get("train_backbone", False),
+            "backbone_blocks": stage_cfg.get("backbone_blocks"),
+            "backbone_extra_modules": backbone_extra_modules,
+            "freeze_modules": freeze_modules,
+            "optimizer_overrides": optimizer_cfg,
+            "head_lr": optimizer_cfg.get("lr"),
+            "head_weight_decay": optimizer_cfg.get("weight_decay"),
+            "backbone_lr": backbone_opt_cfg.get("lr"),
+            "backbone_weight_decay": backbone_opt_cfg.get("weight_decay"),
+            "lr_overrides": lr_cfg,
+        }
+        stages.append(stage)
+        consumed_epochs += stage_epochs
 
-    remaining_epochs = total_epochs - consumed_epochs
-    if remaining_epochs > 0:
-        stages.append(
-            {
-                "name": "full",
-                "type": "full",
-                "epochs": remaining_epochs,
-                "train_head": True,
-                "train_backbone": True,
-                "backbone_blocks": "all",
-                "backbone_lr": head_cfg.get("full_backbone_lr"),
-                "backbone_extra_modules": backbone_extra_modules,
-                "freeze_modules": freeze_modules,
-                "optimizer_overrides": head_cfg.get("full_optimizer_kwargs"),
-                "lr_overrides": head_cfg.get("full_lr_scheduler_kwargs"),
-            }
-        )
+    if stages_cfg:
+        for idx, stage_cfg in enumerate(stages_cfg):
+            _append_stage(stage_cfg, f"stage_{idx + 1}")
+            if consumed_epochs >= total_epochs:
+                break
+    else:
+        # backward compatibility with legacy keys
+        legacy_cfg = {
+            "name": "head",
+            "epochs": head_cfg.get("head_epochs", 0),
+            "train_head": True,
+            "train_backbone": False,
+            "optimizer": head_cfg.get("head_optimizer_kwargs"),
+            "lr_scheduler": head_cfg.get("head_lr_scheduler_kwargs"),
+        }
+        _append_stage(legacy_cfg, "head")
+        partial_cfg = {
+            "name": "partial",
+            "epochs": head_cfg.get("partial_epochs", 0),
+            "train_head": True,
+            "train_backbone": True,
+            "backbone_blocks": head_cfg.get("partial_backbone_blocks"),
+            "optimizer": head_cfg.get("partial_optimizer_kwargs"),
+            "backbone": {
+                "lr": head_cfg.get("partial_backbone_lr"),
+                "weight_decay": head_cfg.get("partial_backbone_weight_decay"),
+            },
+            "lr_scheduler": head_cfg.get("partial_lr_scheduler_kwargs"),
+        }
+        _append_stage(partial_cfg, "partial")
+        full_cfg = {
+            "name": "full",
+            "epochs": total_epochs - consumed_epochs,
+            "train_head": True,
+            "train_backbone": True,
+            "backbone_blocks": "all",
+            "optimizer": head_cfg.get("full_optimizer_kwargs"),
+            "backbone": {
+                "lr": head_cfg.get("full_backbone_lr"),
+                "weight_decay": head_cfg.get("full_backbone_weight_decay"),
+            },
+            "lr_scheduler": head_cfg.get("full_lr_scheduler_kwargs"),
+        }
+        _append_stage(full_cfg, "full")
+
+    if consumed_epochs < total_epochs and stages:
+        stages[-1]["epochs"] += total_epochs - consumed_epochs
 
     return stages
 
@@ -376,7 +405,8 @@ def val_pass(device, model, data, config):
 
 
 def train_vitdet(config, model, device, train_data, val_data, output_file):
-    stages = _build_training_stages(config)
+    head_cfg = config.get("head_training") or {}
+    stages = _build_training_stages(config, head_cfg)
     total_epochs = sum(stage["epochs"] for stage in stages)
     if total_epochs == 0:
         print("配置的训练 epoch 数为 0，跳过训练。")
@@ -389,6 +419,8 @@ def train_vitdet(config, model, device, train_data, val_data, output_file):
         tensorboard = None
 
     optimizer_class = getattr(optim, config["optimizer"])
+    param_groups = _build_optimizer_param_groups(model, head_cfg)
+    optimizer = optimizer_class(param_groups, **config["optimizer_kwargs"])
     use_amp = torch.cuda.is_available() and isinstance(device, str) and device.startswith("cuda")
     completed_epochs = 0
     for stage_idx, stage in enumerate(stages, start=1):
@@ -407,16 +439,13 @@ def train_vitdet(config, model, device, train_data, val_data, output_file):
             else:
                 _set_modules_trainable(model, ["backbone"], False)
 
-        optimizer_kwargs = _merge_dict(config["optimizer_kwargs"], stage["optimizer_overrides"])
+        stage_base_lr = _configure_optimizer_for_stage(optimizer, stage, config["optimizer_kwargs"])
         lr_sched_kwargs = _merge_dict(config["lr_scheduler_kwargs"], stage["lr_overrides"])
-
-        param_groups = _collect_stage_param_groups(model, stage)
-        optimizer = optimizer_class(param_groups, **optimizer_kwargs)
         lr_sched = LR_Scheduler(
             optimizer,
             lr_sched_kwargs["warmup_epochs"],
             lr_sched_kwargs["min_lr"],
-            optimizer_kwargs["lr"],
+            stage_base_lr,
             stage["epochs"],
         )
         scaler = GradScaler(enabled=use_amp)
