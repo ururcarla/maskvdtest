@@ -1,0 +1,9 @@
+_defaults:
+  - "base_672_argoverse.yml"
+head_training:
+  enabled: false
+layerwise_lr_decay:
+  enabled: true
+  layer_decay: 0.75
+  no_weight_decay_list: []
+

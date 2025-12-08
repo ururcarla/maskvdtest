@@ -21,6 +21,7 @@ from backbones.base import dict_string
 from backbones.policies import TokenNormTopK
 from datasets.builders import build_video_dataset
 from models.vitdet import ViTDet
+from util.lr_decay import param_groups_lrd
 from util.lr_sched import LR_Scheduler
 from utils.config import initialize_run
 from utils.misc import dict_to_device, get_pytorch_device, set_policies, tee_print
@@ -251,6 +252,53 @@ def _build_training_stages(config, head_cfg):
     return stages
 
 
+def _build_layerwise_param_groups(model, optimizer_kwargs, lrd_cfg):
+    base_lr = optimizer_kwargs.get("lr", 0.0)
+    base_wd = optimizer_kwargs.get("weight_decay", 0.0)
+    layer_decay = lrd_cfg.get("layer_decay", 0.75)
+    no_wd_list = lrd_cfg.get("no_weight_decay_list") or []
+
+    param_groups = []
+    tracked = set()
+    backbone = getattr(model, "backbone", None)
+    if backbone is not None:
+        lrd_groups = param_groups_lrd(
+            backbone,
+            weight_decay=base_wd,
+            no_weight_decay_list=no_wd_list,
+            layer_decay=layer_decay,
+        )
+        for idx, group in enumerate(lrd_groups):
+            params = [p for p in group["params"] if p.requires_grad]
+            if not params:
+                continue
+            for p in params:
+                tracked.add(id(p))
+            lr_scale = group.get("lr_scale", 1.0) or 1.0
+            param_groups.append(
+                {
+                    "name": f"layerwise_backbone_{idx}",
+                    "params": params,
+                    "lr_scale": lr_scale,
+                    "lr": base_lr * lr_scale,
+                    "weight_decay": group.get("weight_decay", base_wd),
+                }
+            )
+
+    remaining = [p for p in model.parameters() if p.requires_grad and id(p) not in tracked]
+    if remaining:
+        param_groups.append(
+            {
+                "name": "layerwise_other",
+                "params": remaining,
+                "lr_scale": 1.0,
+                "lr": base_lr,
+                "weight_decay": base_wd,
+            }
+        )
+    return param_groups or [{"params": [p for p in model.parameters() if p.requires_grad]}]
+
+
 def build_datasets(config):
     dataset_cfg = config.get("dataset") or {}
     if not dataset_cfg:
@@ -404,8 +452,81 @@ def val_pass(device, model, data, config):
     return {"metrics": metrics, "counts": counts}
 
 
+def _train_vitdet_layerwise(config, model, device, train_data, val_data, output_file):
+    total_epochs = config.get("epochs", 0)
+    if total_epochs == 0:
+        print("配置的训练 epoch 数为 0，跳过训练。")
+        return
+
+    if "tensorboard" in config:
+        base_name = config["tensorboard"]
+        now_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        tensorboard = SummaryWriter(f"{base_name}_{now_str}")
+    else:
+        tensorboard = None
+
+    optimizer_class = getattr(optim, config["optimizer"])
+    lrd_cfg = config.get("layerwise_lr_decay") or {}
+    param_groups = _build_layerwise_param_groups(model, config["optimizer_kwargs"], lrd_cfg)
+    optimizer = optimizer_class(param_groups, **config["optimizer_kwargs"])
+    lr_sched = LR_Scheduler(
+        optimizer,
+        config["lr_scheduler_kwargs"]["warmup_epochs"],
+        config["lr_scheduler_kwargs"]["min_lr"],
+        config["optimizer_kwargs"]["lr"],
+        total_epochs,
+    )
+    use_amp = torch.cuda.is_available() and isinstance(device, str) and device.startswith("cuda")
+    scaler = GradScaler(enabled=use_amp)
+
+    for epoch in range(total_epochs):
+        global_epoch = epoch + 1
+        print(f"\nEpoch {global_epoch}/{total_epochs} (layerwise)")
+        train_pass(
+            config,
+            device,
+            "layerwise",
+            global_epoch,
+            global_epoch,
+            model,
+            optimizer,
+            lr_sched,
+            train_data,
+            tensorboard,
+            scaler,
+        )
+        results = val_pass(device, model, val_data, config)
+        model.reset()
+
+        if isinstance(results, dict):
+            for key, val in results.items():
+                tee_print(key.capitalize(), output_file)
+                tee_print(dict_string(val), output_file)
+        else:
+            tee_print(results, output_file)
+        tee_print("", output_file)
+
+        weight_path = Path(config["_output"]) / f"weights_epoch_{global_epoch}.pth"
+        torch.save(model.state_dict(), weight_path)
+        print(f"Saved weights to {weight_path}")
+
+    if tensorboard is not None:
+        tensorboard.close()
+
+    final_path = Path(config["_output"]) / "weights_final.pth"
+    torch.save(model.state_dict(), final_path)
+    print(f"Saved weights to {final_path}")
+
+
 def train_vitdet(config, model, device, train_data, val_data, output_file):
     head_cfg = config.get("head_training") or {}
+    layerwise_cfg = config.get("layerwise_lr_decay") or {}
+    staged_enabled = head_cfg.get("enabled", True)
+    use_layerwise = layerwise_cfg.get("enabled") and not staged_enabled
+    if use_layerwise:
+        _train_vitdet_layerwise(config, model, device, train_data, val_data, output_file)
+        return
+
     stages = _build_training_stages(config, head_cfg)
     total_epochs = sum(stage["epochs"] for stage in stages)
     if total_epochs == 0:
@@ -523,7 +644,7 @@ def main():
                 tee_print(dict_string(val), output_file)
         else:
             tee_print(results, output_file)
-        tee_print("", output_file)
+        tee_print("", output_file) 
     else:
         train_vitdet(config, model, device, train_data, val_data, output_file)
 

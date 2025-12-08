@@ -29,6 +29,7 @@ dataloader_workers: 4
 
 # --------- 阶段化训练策略 ---------
 head_training:
+  enabled: true
   head_modules: ["pyramid", "proposal_generator", "roi_heads"]
   freeze_modules: ["preprocessing", "embedding", "backbone"]
   stages:
@@ -78,3 +79,7 @@ head_training:
       lr_scheduler:
         min_lr: 1.0e-7
         warmup_epochs: 1
+layerwise_lr_decay:
+  enabled: false
+  layer_decay: 0.75
+  no_weight_decay_list: []
