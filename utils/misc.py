@@ -71,7 +71,10 @@ def decode_video(
 
 
 def dict_to_device(x, device):
-    return {key: value.to(device) for key, value in x.items()}
+    def _to_device(value):
+        return value.to(device) if hasattr(value, "to") else value
+
+    return {key: _to_device(value) for key, value in x.items()}
 
 
 # https://gist.github.com/wasi0013/ab73f314f8070951b92f6670f68b2d80
