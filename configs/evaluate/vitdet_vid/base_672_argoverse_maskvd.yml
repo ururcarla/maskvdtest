@@ -10,6 +10,6 @@ dataset:
         val: "./data/argoverse/Argoverse-HD/annotations/val.json"
 model:
   classes: 8
-weights: "results/train/vitdet_vid_baseline/base_672_argoverse/weights_final.pth"
+weights: "results/train/vitdet_argoverse_mask/weights_final.pth"
 vanilla: true
 
