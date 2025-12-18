@@ -104,25 +104,35 @@ def iter_parquet_rows(path: Path, columns: List[str] | None, batch_size: int):
             yield row
 
 
+def get_first(row: dict, names: Iterable[str]):
+    """Return first non-None value among candidate field names."""
+    for name in names:
+        if name is None:
+            continue
+        if name in row and row[name] is not None:
+            return row[name]
+    return None
+
+
 def discover_parquet_files(directory: Path) -> List[Path]:
     return sorted(p for p in directory.glob("*.parquet"))
 
 
 def bbox_from_row(row: dict) -> Tuple[float, float, float, float] | None:
-    """Extract xyxy bbox from a camera_box row."""
-    # Direct xyxy (if provided)
-    x_min = row.get("bbox_xmin") or row.get("bbox_x_min")
-    y_min = row.get("bbox_ymin") or row.get("bbox_y_min")
-    x_max = row.get("bbox_xmax") or row.get("bbox_x_max")
-    y_max = row.get("bbox_ymax") or row.get("bbox_y_max")
+    """Extract xyxy bbox from a camera_box row with multiple schema fallbacks."""
+    # Direct xyxy (common parquet export)
+    x_min = get_first(row, ["bbox_xmin", "bbox_x_min"])
+    y_min = get_first(row, ["bbox_ymin", "bbox_y_min"])
+    x_max = get_first(row, ["bbox_xmax", "bbox_x_max"])
+    y_max = get_first(row, ["bbox_ymax", "bbox_y_max"])
     if None not in (x_min, y_min, x_max, y_max):
         return float(x_min), float(y_min), float(x_max), float(y_max)
 
-    box_struct = row.get("box") or {}
-    cx = box_struct.get("center_x")
-    cy = box_struct.get("center_y")
-    w = box_struct.get("length") or box_struct.get("width")
-    h = box_struct.get("width") or box_struct.get("length")
+    # Waymo parquet schema with flattened names
+    cx = get_first(row, ["[CameraBoxComponent].box.center.x", "box.center_x", "box.center.x"])
+    cy = get_first(row, ["[CameraBoxComponent].box.center.y", "box.center_y", "box.center.y"])
+    w = get_first(row, ["[CameraBoxComponent].box.size.x", "box.length", "box.size.x", "box.width"])
+    h = get_first(row, ["[CameraBoxComponent].box.size.y", "box.width", "box.size.y", "box.length"])
     if None in (cx, cy, w, h):
         return None
     x_min = float(cx) - float(w) / 2.0
@@ -142,6 +152,10 @@ def build_box_index(
     index: Dict[Tuple[str, int, int], List[dict]] = defaultdict(list)
     columns = [
         "key",
+        "key.segment_context_name",
+        "key.frame_timestamp_micros",
+        "key.camera_name",
+        "key.camera_object_id",
         "box",
         "label",
         "type",
@@ -151,15 +165,19 @@ def build_box_index(
         "bbox_ymin",
         "bbox_xmax",
         "bbox_ymax",
+        "[CameraBoxComponent].box.center.x",
+        "[CameraBoxComponent].box.center.y",
+        "[CameraBoxComponent].box.size.x",
+        "[CameraBoxComponent].box.size.y",
+        "[CameraBoxComponent].type",
     ]
     for path in parquet_paths:
         for row in iter_parquet_rows(path, columns=columns, batch_size=batch_size):
-            key = row.get("key") or {}
-            cam_id = key.get("camera_name")
+            cam_id = get_first(row, ["key.camera_name"])
             if cam_id not in ALLOWED_CAMERAS:
                 continue
-            segment = key.get("segment_context_name")
-            ts = key.get("frame_timestamp_micros")
+            segment = get_first(row, ["key.segment_context_name"])
+            ts = get_first(row, ["key.frame_timestamp_micros"])
             if segment is None or ts is None:
                 continue
 
@@ -167,13 +185,11 @@ def build_box_index(
             if bbox is None:
                 continue
 
-            label = row.get("label")
-            if label is None:
-                label = row.get("type")
+            label = get_first(row, ["label", "type", "[CameraBoxComponent].type"])
             if label is None or label not in WAYMO_CLASSES:
                 continue
 
-            object_id = row.get("object_id") or row.get("id")
+            object_id = get_first(row, ["object_id", "id", "key.camera_object_id"])
             index[(segment, cam_id, ts)].append(
                 {"bbox": bbox, "label": int(label), "object_id": object_id}
             )
@@ -331,15 +347,24 @@ def main():
     frame_counters: Dict[str, int] = defaultdict(int)
     image_id = 1
 
-    image_columns = ["key", "image", "width", "height"]
+    image_columns = [
+        "key",
+        "key.segment_context_name",
+        "key.frame_timestamp_micros",
+        "key.camera_name",
+        "image",
+        "encoded_image",
+        "[CameraImageComponent].image",
+        "width",
+        "height",
+    ]
     for img_path in image_paths:
         for row in iter_parquet_rows(img_path, columns=image_columns, batch_size=args.batch_size):
-            key = row.get("key") or {}
-            cam_id = key.get("camera_name")
+            cam_id = get_first(row, ["key.camera_name"])
             if cam_id not in ALLOWED_CAMERAS:
                 continue
-            segment = key.get("segment_context_name")
-            ts = key.get("frame_timestamp_micros")
+            segment = get_first(row, ["key.segment_context_name"])
+            ts = get_first(row, ["key.frame_timestamp_micros"])
             if segment is None or ts is None:
                 continue
 
@@ -353,11 +378,11 @@ def main():
             if args.max_frames_per_video is not None and idx >= args.max_frames_per_video:
                 continue
 
-            encoded = row.get("image")
+            encoded = get_first(row, ["image", "encoded_image", "[CameraImageComponent].image"])
             if encoded is None:
                 continue
-            width = row.get("width")
-            height = row.get("height")
+            width = get_first(row, ["width"])
+            height = get_first(row, ["height"])
             if width is None or height is None:
                 with Image.open(io.BytesIO(encoded)) as im:
                     width, height = im.size
