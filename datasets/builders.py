@@ -31,6 +31,8 @@ def build_video_dataset(
         return _build_vid_dataset(dataset_args, split, transform, shuffle)
     if dataset_name == "argoverse":
         return _build_argoverse_dataset(dataset_args, split, transform, shuffle)
+    if dataset_name == "waymo":
+        return _build_waymo_dataset(dataset_args, split, transform, shuffle)
 
     raise ValueError(f"Unsupported dataset '{dataset_name}'.")
 
@@ -57,6 +59,25 @@ def _build_argoverse_dataset(args: Dict[str, Any], split: str, transform, shuffl
     if img_root is None or ann_file is None:
         raise ValueError(
             "Argoverse dataset requires 'img_root' and 'ann_files.<split>' entries."
+        )
+
+    return ArgoverseVID(
+        img_root=Path(img_root),
+        ann_file=Path(ann_file),
+        shuffle=shuffle,
+        combined_transform=transform,
+        min_box_size=args.get("min_box_size", 2),
+    )
+
+
+def _build_waymo_dataset(args: Dict[str, Any], split: str, transform, shuffle: bool):
+    img_root = args.get("img_root")
+    ann_files = args.get("ann_files") or {}
+    ann_file = ann_files.get(split)
+
+    if img_root is None or ann_file is None:
+        raise ValueError(
+            "Waymo dataset requires 'img_root' and 'ann_files.<split>' entries."
         )
 
     return ArgoverseVID(

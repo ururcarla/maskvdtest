@@ -1,0 +1,15 @@
+_defaults:
+  - "_size_1024.yml"
+dataset:
+  name: "waymo"
+  train_split: "train"
+  val_split: "val"
+  args:
+    waymo:
+      img_root: "./data/waymo_vid/train/frames"
+      ann_files:
+        train: "./data/waymo_vid/train/annotations/instances_train.json"
+        val: "./data/waymo_vid/val/annotations/instances_val.json"
+model:
+  classes: 3
+
