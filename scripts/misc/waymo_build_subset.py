@@ -121,6 +121,7 @@ def _subset_coco(coco_in: Path, out_file: Path, keep_videos: Set[str]):
         images.append(img)
 
     keep_image_ids = set(id_map.keys())
+    annotations = []
     ann_id = 1
     for ann in data["annotations"]:
         if ann["image_id"] not in keep_image_ids:
