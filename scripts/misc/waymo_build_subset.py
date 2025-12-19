@@ -29,8 +29,13 @@ OTHER_SUFFIXES = [s for s in CAM_SUFFIXES if s != FRONT_SUFFIX]
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--coco-in", type=Path, required=True, help="输入 COCO 标注 (instances_x.json)")
-    p.add_argument("--vid-in", type=Path, default=None, help="可选：输入 VID labels.json")
+    p.add_argument(
+        "--coco-in",
+        type=Path,
+        default=None,
+        help="输入 COCO 标注 (instances_x.json)，若缺失且提供 VID 将从 VID 构造 COCO。",
+    )
+    p.add_argument("--vid-in", type=Path, default=None, help="可选：输入 VID labels.json（可用于构造/子集）")
     p.add_argument("--out-root", type=Path, required=True, help="输出根目录，生成 annotations/ 下文件")
     p.add_argument("--split", choices=["train", "val"], default="train", help="split 名用于输出文件名")
     p.add_argument("--front-segments", type=int, default=60, help="取多少个 segment 的前向相机")
@@ -158,22 +163,98 @@ def _subset_vid(vid_in: Path, out_file: Path, keep_videos: Set[str]):
           f"(images={len(images)}, anns={len(annotations)})")
 
 
+def _build_coco_from_vid(vid_data: Dict) -> Dict:
+    """
+    将 ImageNet-VID 风格的 labels.json 转为 COCO 视频格式，便于子集和 ArgoverseVID 读取。
+    假设 file_name 形如 <video_id>/<video_id>_000123.jpg。
+    """
+    # 聚合按 video_id
+    frames_by_video: Dict[str, List[Dict]] = {}
+    for img in vid_data.get("images", []):
+        file_name = img["file_name"]
+        parts = Path(file_name).parts
+        if len(parts) < 2:
+            continue
+        video_id = parts[0]
+        frames_by_video.setdefault(video_id, []).append(img)
+
+    # 便于查找 annotations
+    anns_by_image = {}
+    for ann in vid_data.get("annotations", []):
+        anns_by_image.setdefault(ann["image_id"], []).append(ann)
+
+    seq_dirs = sorted(frames_by_video.keys())
+    seq_id_map = {vid: sid for sid, vid in enumerate(seq_dirs)}
+
+    images = []
+    annotations = []
+    ann_id = 1
+    image_id = 1
+    for vid in seq_dirs:
+        frames = sorted(frames_by_video[vid], key=lambda x: x["file_name"])
+        for fid, img in enumerate(frames):
+            name = Path(img["file_name"]).name
+            images.append(
+                {
+                    "id": image_id,
+                    "sid": seq_id_map[vid],
+                    "fid": fid,
+                    "name": name,
+                    "height": img["height"],
+                    "width": img["width"],
+                }
+            )
+            for ann in anns_by_image.get(img["id"], []):
+                x, y, w, h = ann["bbox"]
+                annotations.append(
+                    {
+                        "id": ann_id,
+                        "image_id": image_id,
+                        "category_id": ann["category_id"],
+                        "bbox": [x, y, w, h],
+                        "area": w * h,
+                        "iscrowd": ann.get("iscrowd", 0),
+                    }
+                )
+                ann_id += 1
+            image_id += 1
+
+    return {
+        "seq_dirs": seq_dirs,
+        "images": images,
+        "annotations": annotations,
+        "categories": vid_data.get("categories", []),
+    }
+
+
 def main():
     args = parse_args()
     coco_path = args.coco_in
     vid_path = args.vid_in
-    if not coco_path.is_file():
-        raise FileNotFoundError(f"COCO 输入不存在: {coco_path}")
+    if coco_path is None and vid_path is None:
+        raise FileNotFoundError("至少需要提供 --coco-in 或 --vid-in 之一。")
 
-    data = json.loads(coco_path.read_text())
-    keep_videos = _filter_video_ids(data.get("seq_dirs", []), args)
+    # 如果没有 COCO 输入但有 VID，则先用 VID 构造 COCO 数据体
+    coco_data = None
+    if coco_path and coco_path.is_file():
+        coco_data = json.loads(coco_path.read_text())
+    elif vid_path and vid_path.is_file():
+        coco_data = _build_coco_from_vid(json.loads(vid_path.read_text()))
+    else:
+        raise FileNotFoundError("找不到 COCO 或 VID 输入文件。")
+
+    keep_videos = _filter_video_ids(coco_data.get("seq_dirs", []), args)
     if not keep_videos:
         raise RuntimeError("未选出任何序列，请检查相机后缀或数量参数。")
 
     ann_dir = args.out_root / args.split / "annotations"
     ann_dir.mkdir(parents=True, exist_ok=True)
     coco_out = ann_dir / f"instances_{args.split}.json"
-    _subset_coco(coco_path, coco_out, keep_videos)
+    # 先把 coco_data 写到临时变量再子集，避免需要文件存在
+    tmp_coco_path = coco_out.with_suffix(".tmp.json")
+    tmp_coco_path.write_text(json.dumps(coco_data))
+    _subset_coco(tmp_coco_path, coco_out, keep_videos)
+    tmp_coco_path.unlink(missing_ok=True)
 
     if vid_path:
         vid_out = args.out_root / args.split / "labels.json"
