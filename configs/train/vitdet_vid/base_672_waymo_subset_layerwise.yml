@@ -1,0 +1,17 @@
+_defaults:
+  - "_size_672.yml"
+dataset:
+  name: "waymo"
+  train_split: "train"
+  val_split: "val"
+  args:
+    waymo:
+      img_root: "./data/waymo/train/frames"
+      ann_files:
+        train: "./data/waymo_subset/train/annotations/instances_train.json"
+        val: "./data/waymo_subset/val/annotations/instances_val.json"
+model:
+  classes: 3
+layerwise_lr_decay:
+  enabled: true
+  layer_decay: 0.75
