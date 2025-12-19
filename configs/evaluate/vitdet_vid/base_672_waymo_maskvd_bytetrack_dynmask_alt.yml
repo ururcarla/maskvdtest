@@ -1,0 +1,4 @@
+_defaults:
+  - "base_672_waymo_maskvd_bytetrack.yml"
+tracker_mask_margin: 4
+

@@ -1,0 +1,12 @@
+_defaults:
+  - "base_672_waymo_subset_maskvd.yml"
+tracker:
+  track_activation_threshold: 0.5
+  lost_track_buffer: 30
+  minimum_matching_threshold: 0.8
+  frame_rate: 30
+  minimum_consecutive_frames: 1
+  input_score_threshold: 0.5
+tracker_mask_margin: 0
+region_size: 16
+

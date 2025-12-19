@@ -1,0 +1,15 @@
+_defaults:
+  - "_size_672.yml"
+dataset:
+  name: "waymo"
+  split: "val"
+  args:
+    waymo:
+      img_root: "./data/waymo/train/frames"
+      ann_files:
+        val: "./data/waymo_subset/val/annotations/instances_val.json"
+model:
+  classes: 3
+weights: "results/train/vitdet_vid_baseline/base_672_waymo_subset/weights_final.pth"
+vanilla: true
+

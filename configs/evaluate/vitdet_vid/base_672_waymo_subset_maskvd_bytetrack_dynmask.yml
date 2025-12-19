@@ -1,0 +1,7 @@
+_defaults:
+  - "base_672_waymo_subset_maskvd_bytetrack_dynmask_alt.yml"
+dynamic_heatmap_window: 30
+dynamic_heatmap_min_frames: 10
+dynamic_heatmap_min_activity: 1.0
+dynamic_heatmap_score_threshold: 0.75
+
