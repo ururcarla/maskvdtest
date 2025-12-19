@@ -71,7 +71,11 @@ def _build_argoverse_dataset(args: Dict[str, Any], split: str, transform, shuffl
 
 
 def _build_waymo_dataset(args: Dict[str, Any], split: str, transform, shuffle: bool):
-    img_root = args.get("img_root")
+    img_root_cfg = args.get("img_root")
+    if isinstance(img_root_cfg, dict):
+        img_root = img_root_cfg.get(split)
+    else:
+        img_root = img_root_cfg
     ann_files = args.get("ann_files") or {}
     ann_file = ann_files.get(split)
 

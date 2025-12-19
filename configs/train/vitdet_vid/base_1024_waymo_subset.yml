@@ -7,7 +7,9 @@ dataset:
   args:
     waymo:
       # 直接指向全量帧目录，无需复制图像
-      img_root: "./data/waymo/train/frames"
+      img_root:
+        train: "./data/waymo/train/frames"
+        val: "./data/waymo/val/frames"
       ann_files:
         train: "./data/waymo_subset/train/annotations/instances_train.json"
         val: "./data/waymo_subset/val/annotations/instances_val.json"

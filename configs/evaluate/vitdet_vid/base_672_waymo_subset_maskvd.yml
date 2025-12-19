@@ -5,7 +5,8 @@ dataset:
   split: "val"
   args:
     waymo:
-      img_root: "./data/waymo/train/frames"
+      img_root:
+        val: "./data/waymo/val/frames"
       ann_files:
         val: "./data/waymo_subset/val/annotations/instances_val.json"
 model:
