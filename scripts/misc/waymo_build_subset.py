@@ -205,6 +205,9 @@ def _build_coco_from_vid(vid_data: Dict) -> Dict:
         frames = sorted(frames_by_video[vid], key=lambda x: x["file_name"])
         for fid, img in enumerate(frames):
             name = Path(img["file_name"]).name
+            prefix = f"{vid}_"
+            if name.startswith(prefix):
+                name = name[len(prefix) :]
             images.append(
                 {
                     "id": image_id,
