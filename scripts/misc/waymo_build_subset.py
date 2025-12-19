@@ -100,8 +100,8 @@ def _subset_coco(coco_in: Path, out_file: Path, keep_videos: Set[str]):
     new_seq_dirs = [vid for vid in seq_dirs if vid in keep_videos]
     seq_id_map = {vid: idx for idx, vid in enumerate(new_seq_dirs)}
 
-    images = []
-    annotations = []
+    # 先筛选图像并重排 sid/fid，随后重新分配连续的 image_id
+    filtered_images = []
     for img in data["images"]:
         vid = seq_dirs[img["sid"]]
         if vid not in keep_videos:
@@ -109,14 +109,24 @@ def _subset_coco(coco_in: Path, out_file: Path, keep_videos: Set[str]):
         new_sid = seq_id_map[vid]
         new_img = dict(img)
         new_img["sid"] = new_sid
-        images.append(new_img)
+        filtered_images.append(new_img)
 
-    keep_image_ids = {img["id"] for img in images}
+    # 重新分配 image_id 连续，从 1 开始
+    images = []
+    id_map = {}
+    for new_id, img in enumerate(filtered_images, start=1):
+        id_map[img["id"]] = new_id
+        img = dict(img)
+        img["id"] = new_id
+        images.append(img)
+
+    keep_image_ids = set(id_map.keys())
     ann_id = 1
     for ann in data["annotations"]:
         if ann["image_id"] not in keep_image_ids:
             continue
         new_ann = dict(ann)
+        new_ann["image_id"] = id_map[new_ann["image_id"]]
         new_ann["id"] = ann_id
         ann_id += 1
         annotations.append(new_ann)
