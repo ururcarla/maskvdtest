@@ -1,19 +1,5 @@
 _defaults:
-  - "_size_1024.yml"
-dataset:
-  name: "waymo"
-  train_split: "train"
-  val_split: "val"
-  args:
-    waymo:
-      img_root:
-        train: "./data/waymo/train/frames"
-        val: "./data/waymo/val/frames"
-      ann_files:
-        train: "./data/waymo_subset/train/annotations/instances_train.json"
-        val: "./data/waymo_subset/val/annotations/instances_val.json"
-model:
-  classes: 3
+  - "base_1024_argoverse.yml"
 head_training:
   enabled: false
 layerwise_lr_decay:
@@ -46,3 +32,4 @@ layerwise_lr_decay:
     - "blocks.10.relative_position.x_embedding"
     - "blocks.11.relative_position.y_embedding"
     - "blocks.11.relative_position.x_embedding"
+
