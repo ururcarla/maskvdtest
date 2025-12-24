@@ -1,0 +1,25 @@
+_defaults:
+  - "base_672_argoverse_maskvd.yml"
+tracker:
+  track_activation_threshold: 0.5
+  lost_track_buffer: 30
+  minimum_matching_threshold: 0.8
+  frame_rate: 30
+  minimum_consecutive_frames: 1
+  input_score_threshold: 0.5
+dynamic_heatmap_window: 30
+dynamic_heatmap_min_frames: 10
+dynamic_heatmap_min_activity: 1.0
+dynamic_heatmap_score_threshold: 0.75
+region_size: 16
+safety:
+  enabled: true
+  matching_iou_threshold: 0.5
+  avg_iou_threshold: 0.8
+  max_detection_miss_rate: 0.15
+  max_track_miss_rate: 0.15
+  speed_change_threshold: 5.0
+period: 4
+sparsity: 0.8 # 1 - keep rate
+_output: "results/evaluate/argoverse/${_name}/"
+split: "val"
