@@ -1,5 +1,5 @@
 _defaults:
-  - "_size_672_maskvd.yml"
+  - "_size_1024_maskvd.yml"
 dataset:
   name: "waymo"
   split: "val"
@@ -11,6 +11,6 @@ dataset:
         val: "./data/waymo_subset/val/annotations/instances_val.json"
 model:
   classes: 3
-weights: "results/train/vitdet_waymo_subset_mask/weights_final.pth"
+weights: "results/train/vitdet_waymo_2/weights_final.pth"
 vanilla: true
 

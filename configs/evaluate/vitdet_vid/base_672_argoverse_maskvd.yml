@@ -1,5 +1,5 @@
 _defaults:
-  - "_size_672_maskvd.yml"
+  - "_size_1024_maskvd.yml"
 dataset:
   name: "argoverse"
   split: "val"
@@ -10,6 +10,6 @@ dataset:
         val: "./data/argoverse/Argoverse-HD/annotations/val.json"
 model:
   classes: 8
-weights: "results/train/vitdet_argoverse/weights_final.pth"
+weights: "results/train/vitdet_argoverse_3/weights_final.pth"
 vanilla: true
 
