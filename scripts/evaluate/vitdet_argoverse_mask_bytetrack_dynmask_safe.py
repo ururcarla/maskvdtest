@@ -505,7 +505,6 @@ def val_pass(device, model, data, config, output_file):
     short_edge_length = vid_item.dataset.combined_transform.short_edge_length
     max_size = vid_item.dataset.combined_transform.max_size
     target_sparsity = float(config.get("sparsity", 1.0))
-    mask_enabled = target_sparsity < 1.0
     tracker_cfg = config.get("tracker", {})
     tracker = sv.ByteTrack(
         track_activation_threshold=tracker_cfg.get(
@@ -547,15 +546,11 @@ def val_pass(device, model, data, config, output_file):
         prev_results_for_mask = None
         safe_tracker_only = False
         prev_detection_boxes = {}
-        heatmap_state = (
-            SlidingWindowHeatmap(
-                image_shape=tuple(img_shape),
-                region_size=region_size,
-                window_size=heatmap_window,
-                score_threshold=heatmap_score_threshold,
-            )
-            if mask_enabled
-            else None
+        heatmap_state = SlidingWindowHeatmap(
+            image_shape=tuple(img_shape),
+            region_size=region_size,
+            window_size=heatmap_window,
+            score_threshold=heatmap_score_threshold,
         )
         heatmap_mask_cache = None
         for frame, annotations in vid_item:
@@ -583,7 +578,6 @@ def val_pass(device, model, data, config, output_file):
                 if (
                     run_model
                     and not is_key_frame
-                    and mask_enabled
                 ):
                     dynamic_mask = get_region_mask_from_results(
                         prev_results_for_mask,
