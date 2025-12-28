@@ -74,7 +74,7 @@ def evaluate_vitdet_metrics(device, model, data, config):
     return {"metrics": metrics, "recall": recall_metrics, "counts": counts}
 
 def main():
-    config = initialize_run(config_location=Path("configs", "evaluate", "vitdet_vid"))
+    config = initialize_run(config_location=Path("configs", "evaluate", "vitdet_kitti"))
     long_edge = max(config["model"]["input_shape"][-2:])
     data = build("val", args=None)
     run_evaluations(config, ViTDet, data, evaluate_vitdet_metrics)
