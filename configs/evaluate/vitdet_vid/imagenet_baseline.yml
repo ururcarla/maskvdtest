@@ -1,4 +1,6 @@
 _defaults:
-  - "base_672.yml"
+  - "_size_672_maskvd.yml"
+vanilla: true
+sparsity: 1.0 # 1 - keep rate
 _output: "results/evaluate/imagenet/${_name}/"
 split: "vid_train"
