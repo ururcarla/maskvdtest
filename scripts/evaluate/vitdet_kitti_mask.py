@@ -111,12 +111,7 @@ def val_pass(device, model, data, config, output_file):
             model.reset()
             step = 0
         with torch.inference_mode():
-            # 稀疏率为1时不传mask，直接全量推理
-            if config["sparsity"] >= 1.0:
-                mask_index = None
-                sparsity = 0
-                window_index = None
-            elif step % config["period"] == 0:
+            if step % config["period"] == 0:
                 mask_index = None
                 sparsity = 0
                 window_index = None

@@ -146,12 +146,7 @@ def val_pass(device, model, data, config, output_file):
                 # # MASK INDEX FOR TESTING ONLY TOKEN DROP W/O MASK (EVIT)
                 # n_tokens = 1764
                 # mask_index, _ = model.get_region_mask_static(region_sparsity=1 - config["sparsity"]) # sparsity is keep rate 
-                # 稀疏率为1时不传mask，直接全量推理
-                if config["sparsity"] >= 1.0:
-                    mask_index = None
-                    sparsity = 0
-                    window_index = None
-                elif step % config["period"] == 0:
+                if step % config["period"] == 0:
                     mask_index = None
                     sparsity = 0
                     window_index = None
