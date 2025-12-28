@@ -1,0 +1,10 @@
+_defaults:
+  - "configs/models/vitdet_b_vid.yml"
+vanilla: false
+margin: 0
+period: 8
+conf: 0.5
+weights: "results/train/vitdet_kitti5/base_672/weights_epoch_7.pth"
+nb_classes: 4
+_output: "results/evaluate/kitti/${_name}/"
+split: "vid_train"

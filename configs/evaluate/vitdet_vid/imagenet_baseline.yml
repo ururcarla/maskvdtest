@@ -1,0 +1,4 @@
+_defaults:
+  - "base_672.yml"
+_output: "results/evaluate/imagenet/${_name}/"
+split: "vid_train"

@@ -1,0 +1,17 @@
+_defaults:
+  - "_size_1024.yml"
+dataset:
+  name: "waymo"
+  split: "val"
+  args:
+    waymo:
+      img_root:
+        val: "./data/waymo/val/frames"
+      ann_files:
+        val: "./data/waymo_subset/val/annotations/instances_val.json"
+model:
+  classes: 3
+weights: "results/train/vitdet_waymo_2/weights_final.pth"
+vanilla: true
+_output: "results/evaluate/waymo_subset/${_name}/"
+split: "val"
