@@ -470,6 +470,7 @@ def val_pass(device, model, data, config, output_file):
     max_size = vid_item.dataset.combined_transform.max_size
     target_sparsity = float(config.get("sparsity", 1.0))
     tracker_cfg = config.get("tracker", {})
+    tracker_enabled = tracker_cfg.get("enabled", False)
     tracker = sv.ByteTrack(
         track_activation_threshold=tracker_cfg.get(
             "track_activation_threshold", 0.5
@@ -482,7 +483,7 @@ def val_pass(device, model, data, config, output_file):
         minimum_consecutive_frames=tracker_cfg.get(
             "minimum_consecutive_frames", 1
         ),
-    )
+    ) if tracker_enabled else None
     region_size = config.get("region_size", 16)
     total_region_tokens = (
         (img_shape[0] // region_size) * (img_shape[1] // region_size)
@@ -513,7 +514,8 @@ def val_pass(device, model, data, config, output_file):
         step = 0
         n_frames += len(vid_item)
         model.reset()
-        tracker.reset()
+        if tracker_enabled and tracker is not None:
+            tracker.reset()
         track_metadata = {}
         prev_results_for_mask = None
         safe_tracker_only = False
@@ -528,10 +530,14 @@ def val_pass(device, model, data, config, output_file):
         for frame, annotations in vid_item:
             with torch.inference_mode():
                 is_key_frame = (step % config["period"]) == 0
-                invalid_track_id = tracker.external_id_counter.NO_ID
-                has_active_tracks = any(
-                    track.is_activated and track.external_track_id != invalid_track_id
-                    for track in getattr(tracker, "tracked_tracks", [])
+                invalid_track_id = tracker.external_id_counter.NO_ID if tracker_enabled and tracker is not None else -1
+                has_active_tracks = (
+                    tracker_enabled
+                    and tracker is not None
+                    and any(
+                        track.is_activated and track.external_track_id != invalid_track_id
+                        for track in getattr(tracker, "tracked_tracks", [])
+                    )
                 )
                 if not has_active_tracks:
                     safe_tracker_only = False
@@ -540,7 +546,7 @@ def val_pass(device, model, data, config, output_file):
                 mask_index_tensor = None
                 sparsity = 0
 
-                if is_key_frame:
+                if is_key_frame or not tracker_enabled:
                     safe_tracker_only = False
                 else:
                     if safe_tracker_only and has_active_tracks:
@@ -584,7 +590,7 @@ def val_pass(device, model, data, config, output_file):
                     detections = results_to_supervision_detections(results[0])
 
                     predicted_eval = None
-                    if safety_enabled and has_active_tracks:
+                    if safety_enabled and tracker_enabled and has_active_tracks:
                         try:
                             tracker_snapshot = copy.deepcopy(tracker)
                             metadata_snapshot = copy.deepcopy(track_metadata)
@@ -594,9 +600,12 @@ def val_pass(device, model, data, config, output_file):
                         except Exception:
                             predicted_eval = None
 
-                    tracker_start = perf_counter()
-                    tracked = tracker.update_with_detections(detections)
-                    tracker_latency += (perf_counter() - tracker_start) * 1000
+                    if tracker_enabled and tracker is not None:
+                        tracker_start = perf_counter()
+                        tracked = tracker.update_with_detections(detections)
+                        tracker_latency += (perf_counter() - tracker_start) * 1000
+                    else:
+                        tracked = None
                     outputs.extend(results)
                     prev_results_for_mask = detach_results_for_mask(results) if dynamic_mask_enabled else None
                     if heatmap_state is not None:
@@ -612,7 +621,8 @@ def val_pass(device, model, data, config, output_file):
                         )
                         if new_heatmap_mask is not None:
                             heatmap_mask_cache = new_heatmap_mask.cpu()
-                    update_track_metadata(tracked, track_metadata)
+                    if tracker_enabled:
+                        update_track_metadata(tracked, track_metadata)
                     total_sparsity += sparsity
                     model_latency += curr_time
                     memory += torch.cuda.max_memory_allocated() / MB
@@ -622,7 +632,7 @@ def val_pass(device, model, data, config, output_file):
                         track_id: box.copy() for track_id, box in prev_detection_boxes.items()
                     }
 
-                    if safety_enabled and predicted_eval is not None:
+                    if safety_enabled and tracker_enabled and predicted_eval is not None:
                         is_safe, _ = evaluate_safety_environment(
                             predicted_eval,
                             detections,
@@ -632,7 +642,7 @@ def val_pass(device, model, data, config, output_file):
                         if is_safe and not safe_tracker_only:
                             safe_tracker_only = True
 
-                    if getattr(tracked, "tracker_id", None) is not None:
+                    if tracker_enabled and getattr(tracked, "tracker_id", None) is not None:
                         for idx, tracker_id in enumerate(tracked.tracker_id):
                             if tracker_id == -1:
                                 continue

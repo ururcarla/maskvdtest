@@ -1,6 +1,7 @@
 _defaults:
   - "base_672_argoverse_maskvd.yml"
 tracker:
+  enabled: true
   track_activation_threshold: 0.5
   lost_track_buffer: 30
   minimum_matching_threshold: 0.8
@@ -23,7 +24,7 @@ dynamic_heatmap_min_frames: 10
 dynamic_heatmap_min_activity: 1.0
 dynamic_heatmap_score_threshold: 0.75
 region_size: 16
-sparsity: 1.0 # 1 - keep rate
+sparsity: 0.8 # 1 - keep rate
 _output: "results/evaluate/argoverse/${_name}/"
 split: "val"
 

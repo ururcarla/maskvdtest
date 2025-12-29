@@ -23,7 +23,7 @@ dynamic_heatmap_min_frames: 10
 dynamic_heatmap_min_activity: 1.0
 dynamic_heatmap_score_threshold: 0.75
 region_size: 16
-sparsity: 1.0 # 1 - keep rate
+sparsity: 0.8 # 1 - keep rate
 _output: "results/evaluate/imagenet/${_name}/"
 split: "vid_train"
 
