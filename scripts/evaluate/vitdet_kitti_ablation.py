@@ -608,6 +608,7 @@ def val_pass(device, model, data, config, output_file):
                     tracker_latency += (perf_counter() - tracker_start) * 1000
                 else:
                     tracked = None
+
                 outputs.extend(results)
                 prev_results_for_mask = detach_results_for_mask(results) if dynamic_mask_enabled else None
                 if heatmap_state is not None:
@@ -649,13 +650,16 @@ def val_pass(device, model, data, config, output_file):
                         if tracker_id == -1:
                             continue
                         prev_detection_boxes[int(tracker_id)] = tracked.xyxy[idx].copy()
-        else:
-            tracker_start = perf_counter()
-            tracked = tracker_predict_detections(tracker, track_metadata)
-            tracker_latency += (perf_counter() - tracker_start) * 1000
-            outputs.append(detections_to_result_dict(tracked, device))
-            system_latency += (perf_counter() - system_start) * 1000
+            else:
+                tracker_start = perf_counter()
+                if tracker_enabled and tracker is not None:
+                    tracked = tracker_predict_detections(tracker, track_metadata)
+                else:
+                    tracked = sv.Detections.empty()
+                tracker_latency += (perf_counter() - tracker_start) * 1000
+                outputs.append(detections_to_result_dict(tracked, device))
 
+            system_latency += (perf_counter() - system_start) * 1000
             step += 1
             count += 1
 
