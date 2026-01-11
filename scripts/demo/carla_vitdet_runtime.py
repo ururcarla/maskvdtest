@@ -93,7 +93,8 @@ class VitDetCarlaRuntime:
         self.resize_hw = (370, 672)
 
         self.states = {}
-        self.box_annotator = sv.BoxAnnotator(thickness=2, text_thickness=1, text_scale=0.5)
+        # text_thickness 仅在较新版本 supervision 中可用，使用通用参数以兼容旧版本
+        self.box_annotator = sv.BoxAnnotator(thickness=2, text_scale=0.5)
 
     def _build_tracker(self):
         return sv.ByteTrack(
