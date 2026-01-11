@@ -19,9 +19,12 @@ world = client.get_world()
 
 settings = world.get_settings()
 settings.synchronous_mode = True  # 开启同步模式
+settings.fixed_delta_seconds = 0.05  # 稳定时间步，避免同步卡住
 world.apply_settings(settings)
 
 traffic_manager = client.get_trafficmanager()
+traffic_manager.set_synchronous_mode(True)  # 与世界同步
+traffic_manager.set_random_device_seed(0)  # 可复现或改成时间种子
 traffic_manager.set_global_distance_to_leading_vehicle(2.5)
 
 blueprint_library = world.get_blueprint_library()
