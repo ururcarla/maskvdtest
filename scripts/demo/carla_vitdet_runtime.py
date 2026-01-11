@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 import torch
 from PIL import Image
+from omegaconf import OmegaConf
 
 import supervision as sv
 from datasets.kitti_tracking import make_coco_transforms
@@ -47,7 +48,10 @@ class VitDetCarlaRuntime:
         config_path="configs/evaluate/vitdet_kitti/kitti_mask_0.yml",
         device=None,
     ):
-        self.config = load_config(Path(config_path))
+        raw_cfg = load_config(Path(config_path), to_container=False)
+        if "_name" not in raw_cfg:
+            raw_cfg["_name"] = Path(config_path).stem
+        self.config = OmegaConf.to_container(raw_cfg, resolve=True)
         self.device = device or get_pytorch_device()
 
         cfg = copy.deepcopy(self.config)
