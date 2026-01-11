@@ -13,7 +13,7 @@ if str(project_root) not in sys.path:
 
 from scripts.demo.carla_vitdet_runtime import VitDetCarlaRuntime
 
-client = carla.Client('localhost', 2000)
+client = carla.Client('172.16.1.24', 2000)
 client.set_timeout(10.0)
 world = client.get_world()
 
