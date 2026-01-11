@@ -93,8 +93,7 @@ class VitDetCarlaRuntime:
         self.resize_hw = (370, 672)
 
         self.states = {}
-        # text_thickness 仅在较新版本 supervision 中可用，使用通用参数以兼容旧版本
-        self.box_annotator = sv.BoxAnnotator(thickness=2, text_scale=0.5)
+        # 使用自定义绘制以兼容旧版 supervision（避免 BoxAnnotator 参数兼容性问题）
 
     def _build_tracker(self):
         return sv.ByteTrack(
@@ -152,32 +151,30 @@ class VitDetCarlaRuntime:
         return boxes_t.cpu().numpy()
 
     def _annotate(self, frame_bgr, boxes, scores, labels, tracker_ids=None):
-        detections = sv.Detections(
-            xyxy=boxes.astype(np.float32),
-            confidence=np.array(scores, dtype=np.float32) if scores is not None else None,
-            class_id=np.array(labels, dtype=np.int64) if labels is not None else None,
-        )
-        if tracker_ids is not None:
-            detections.tracker_id = np.array(tracker_ids, dtype=np.int64)
-        names = []
-        for i in range(len(detections)):
-            tid = (
-                int(detections.tracker_id[i])
-                if getattr(detections, "tracker_id", None) is not None
-                else None
+        if boxes is None or len(boxes) == 0:
+            return frame_bgr
+        vis = frame_bgr.copy()
+        for i, box in enumerate(boxes):
+            x1, y1, x2, y2 = box.astype(np.int32).tolist()
+            color = (0, 255, 0)
+            cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
+            cls = int(labels[i]) if labels is not None and len(labels) > i else 0
+            score = float(scores[i]) if scores is not None and len(scores) > i else 0.0
+            text = f"c{cls}:{score:.2f}"
+            if tracker_ids is not None and len(tracker_ids) > i:
+                tid = int(tracker_ids[i])
+                text = f"id{tid}-" + text
+            cv2.putText(
+                vis,
+                text,
+                (x1, max(0, y1 - 5)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                color,
+                1,
+                cv2.LINE_AA,
             )
-            cls = int(detections.class_id[i]) if detections.class_id is not None else 0
-            score = float(detections.confidence[i]) if detections.confidence is not None else 0.0
-            if tid is not None:
-                names.append(f"id{tid}-c{cls}:{score:.2f}")
-            else:
-                names.append(f"c{cls}:{score:.2f}")
-        annotated = self.box_annotator.annotate(
-            scene=frame_bgr.copy(),
-            detections=detections,
-            labels=names,
-        )
-        return annotated
+        return vis
 
     def infer(self, camera_id, frame_bgr):
         """
