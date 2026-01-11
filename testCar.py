@@ -26,8 +26,15 @@ traffic_manager.set_global_distance_to_leading_vehicle(2.5)
 
 blueprint_library = world.get_blueprint_library()
 vehicle_bp = blueprint_library.filter('vehicle.tesla.model3')[0]
-spawn_point = random.choice(world.get_map().get_spawn_points())
-vehicle = world.spawn_actor(vehicle_bp, spawn_point)
+spawn_points_all = world.get_map().get_spawn_points()
+random.shuffle(spawn_points_all)
+vehicle = None
+for sp in spawn_points_all:
+    vehicle = world.try_spawn_actor(vehicle_bp, sp)
+    if vehicle is not None:
+        break
+if vehicle is None:
+    raise RuntimeError("没有可用的ego车spawn点，请重启或清理场景后重试")
 
 # 摄像头参数
 camera_bp = blueprint_library.find('sensor.camera.rgb')
