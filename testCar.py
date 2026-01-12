@@ -26,6 +26,9 @@ traffic_manager = client.get_trafficmanager()
 traffic_manager.set_synchronous_mode(True)  # 与世界同步
 traffic_manager.set_random_device_seed(0)  # 可复现或改成时间种子
 traffic_manager.set_global_distance_to_leading_vehicle(2.5)
+traffic_manager.set_hybrid_physics_mode(True)  # 远处简化物理，减少卡顿
+traffic_manager.set_respawn_dormant_vehicles(True)
+traffic_manager.set_boundaries_respawn_dormant_vehicles(25, 200)  # 允许卡住车辆重生
 
 blueprint_library = world.get_blueprint_library()
 vehicle_bp = blueprint_library.filter('vehicle.tesla.model3')[0]
@@ -101,12 +104,31 @@ try:
         for name, img in list(image_buffers.items()):
             frames[name] = img
 
-        # 逐相机检测并显示
+        # 逐相机检测并收集结果
+        annotated_frames = {}
         for name, img in frames.items():
             result = detector.infer(name, img)
             if result is None:
                 continue
-            cv2.imshow(f"{name}_det", result["annotated"])
+            annotated_frames[name] = result["annotated"]
+
+        # 组合成 2x2 窗口显示
+        order = ["front", "left", "right", "rear"]
+        cell_w, cell_h = 512, 512
+        blank = np.zeros((cell_h, cell_w, 3), dtype=np.uint8)
+        cells = []
+        for name in order:
+            frame = annotated_frames.get(name)
+            if frame is None:
+                cell = blank.copy()
+            else:
+                cell = cv2.resize(frame, (cell_w, cell_h))
+            cv2.putText(cell, name, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2, cv2.LINE_AA)
+            cells.append(cell)
+        top = np.concatenate(cells[0:2], axis=1)
+        bottom = np.concatenate(cells[2:4], axis=1)
+        grid = np.concatenate([top, bottom], axis=0)
+        cv2.imshow("multi_cam (front, left, right, rear)", grid)
 
         if cv2.waitKey(1) == ord('q'):
             break
