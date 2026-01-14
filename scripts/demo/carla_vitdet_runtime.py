@@ -7,6 +7,7 @@ import numpy as np
 import torch
 from PIL import Image
 from omegaconf import OmegaConf
+from time import perf_counter
 
 import supervision as sv
 from datasets.kitti_tracking import make_coco_transforms
@@ -182,6 +183,9 @@ class VitDetCarlaRuntime:
         """
         if frame_bgr is None:
             return None
+        system_start = perf_counter()
+        model_latency_ms = 0.0
+        tracker_latency_ms = 0.0
         state = self._get_state(camera_id)
         img_tensor = self._prepare_tensor(frame_bgr)
         orig_h, orig_w = frame_bgr.shape[:2]
@@ -223,8 +227,14 @@ class VitDetCarlaRuntime:
                     mask_index_tensor = mask_index_cpu.to(self.device)
 
         if run_model:
+            if self.device.type == "cuda":
+                torch.cuda.synchronize()
+            model_start = perf_counter()
             with torch.inference_mode():
                 results, _ = self.model(batch, mask_index_tensor)
+            if self.device.type == "cuda":
+                torch.cuda.synchronize()
+            model_latency_ms = (perf_counter() - model_start) * 1000
             detections = results_to_supervision_detections(results[0])
 
             safety_enabled = self.safety_cfg.get("enabled", True)
@@ -239,7 +249,9 @@ class VitDetCarlaRuntime:
                 except Exception:
                     predicted_eval = None
 
+            tracker_start = perf_counter()
             tracked = tracker.update_with_detections(detections)
+            tracker_latency_ms = (perf_counter() - tracker_start) * 1000
             update_track_metadata(tracked, state.track_metadata)
             state.prev_results_for_mask = detach_results_for_mask(results)
             if state.heatmap_state is not None:
@@ -281,7 +293,9 @@ class VitDetCarlaRuntime:
             labels = tracked.class_id
             tracker_ids = tracked.tracker_id if hasattr(tracked, "tracker_id") else None
         else:
+            tracker_start = perf_counter()
             tracked = tracker_predict_detections(tracker, state.track_metadata)
+            tracker_latency_ms = (perf_counter() - tracker_start) * 1000
             boxes = tracked.xyxy
             scores = tracked.confidence
             labels = tracked.class_id
@@ -298,12 +312,18 @@ class VitDetCarlaRuntime:
             tracker_ids=tracker_ids,
         )
 
+        system_latency_ms = (perf_counter() - system_start) * 1000
+
         return {
             "annotated": annotated,
             "boxes": boxes,
             "scores": scores,
             "labels": labels,
             "tracker_ids": tracker_ids,
+            "model_latency_ms": model_latency_ms,
+            "tracker_latency_ms": tracker_latency_ms,
+            "system_latency_ms": system_latency_ms,
+            "run_model": run_model,
         }
 
 

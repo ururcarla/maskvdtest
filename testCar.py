@@ -1,6 +1,7 @@
 import time
 import sys
 from pathlib import Path
+import math
 
 import carla
 import random
@@ -12,6 +13,69 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from scripts.demo.carla_vitdet_runtime import VitDetCarlaRuntime
+
+
+def get_camera_intrinsic(image_w: int, image_h: int, fov: float):
+    f = image_w / (2.0 * math.tan(fov * math.pi / 360.0))
+    return np.array([[f, 0, image_w / 2.0], [0, f, image_h / 2.0], [0, 0, 1]], dtype=np.float32)
+
+
+def project_world_to_image(points_world, world2cam, K, image_w, image_h):
+    pixels = []
+    for p in points_world:
+        p_h = np.array([p.x, p.y, p.z, 1.0], dtype=np.float32)
+        p_cam = world2cam @ p_h
+        if p_cam[2] <= 0:
+            continue
+        p_img = K @ (p_cam[:3] / p_cam[2])
+        u, v = p_img[0], p_img[1]
+        if 0 <= u < image_w and 0 <= v < image_h:
+            pixels.append((u, v))
+        else:
+            pixels.append((u, v))  # 仍然保留用于外接框
+    if len(pixels) == 0:
+        return None
+    us, vs = zip(*pixels)
+    x1, x2 = min(us), max(us)
+    y1, y2 = min(vs), max(vs)
+    return [int(x1), int(y1), int(x2), int(y2)]
+
+
+def get_gt_bboxes_for_camera(camera_actor, world, image_w, image_h, fov):
+    K = get_camera_intrinsic(image_w, image_h, fov)
+    world2cam = np.array(camera_actor.get_transform().get_inverse_matrix(), dtype=np.float32)
+    boxes = []
+    actors = world.get_actors()
+    targets = actors.filter('vehicle.*') + actors.filter('walker.*')
+    for actor in targets:
+        bb = actor.bounding_box
+        verts = bb.get_world_vertices(actor.get_transform())
+        box = project_world_to_image(verts, world2cam, K, image_w, image_h)
+        if box is None:
+            continue
+        cls = 1 if 'vehicle' in actor.type_id else 2  # 简单分类示例
+        boxes.append({"bbox": box, "class": cls, "id": actor.id})
+    return boxes
+
+
+def draw_gt_boxes(img, boxes, color=(255, 0, 0)):
+    if boxes is None:
+        return img
+    vis = img.copy()
+    for b in boxes:
+        x1, y1, x2, y2 = b["bbox"]
+        cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
+        cv2.putText(
+            vis,
+            f"GT-{b['class']}",
+            (x1, max(0, y1 - 5)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            color,
+            1,
+            cv2.LINE_AA,
+        )
+    return vis
 
 client = carla.Client('172.16.1.24', 2000)
 client.set_timeout(10.0)
@@ -47,6 +111,7 @@ camera_bp = blueprint_library.find('sensor.camera.rgb')
 camera_bp.set_attribute('image_size_x', '1024')
 camera_bp.set_attribute('image_size_y', '1024')
 camera_bp.set_attribute('fov', '90')
+cam_w, cam_h, cam_fov = 1024, 1024, 90.0
 
 camera_transforms = {
     'front': carla.Transform(carla.Location(x=2.0, z=1.4), carla.Rotation(pitch=0.0, yaw=0.0, roll=0.0)),
@@ -82,7 +147,7 @@ spawn_points = world.get_map().get_spawn_points()
 spawn_points = [sp for sp in spawn_points if sp.location.distance(vehicle.get_location()) > 8.0]
 
 random.shuffle(spawn_points)
-num_npc_vehicles = 30  # 可根据需要设置数量
+num_npc_vehicles = 80  # 可根据需要设置数量
 npc_vehicles = []
 
 for i in range(min(num_npc_vehicles, len(spawn_points))):
@@ -106,11 +171,18 @@ try:
 
         # 逐相机检测并收集结果
         annotated_frames = {}
+        latency_stats = {"model": [], "tracker": [], "system": []}
         for name, img in frames.items():
             result = detector.infer(name, img)
             if result is None:
                 continue
-            annotated_frames[name] = result["annotated"]
+            # 叠加真值框
+            gt_boxes = get_gt_bboxes_for_camera(cameras[name], world, cam_w, cam_h, cam_fov)
+            annotated = draw_gt_boxes(result["annotated"], gt_boxes)
+            annotated_frames[name] = annotated
+            latency_stats["model"].append(result.get("model_latency_ms", 0.0))
+            latency_stats["tracker"].append(result.get("tracker_latency_ms", 0.0))
+            latency_stats["system"].append(result.get("system_latency_ms", 0.0))
 
         # 组合成 2x2 窗口显示
         order = ["front", "left", "right", "rear"]
@@ -128,6 +200,26 @@ try:
         top = np.concatenate(cells[0:2], axis=1)
         bottom = np.concatenate(cells[2:4], axis=1)
         grid = np.concatenate([top, bottom], axis=0)
+
+        def _avg(xs):
+            return sum(xs) / len(xs) if xs else 0.0
+        stats_text = [
+            f"model(ms): { _avg(latency_stats['model']):.1f}",
+            f"tracker(ms): { _avg(latency_stats['tracker']):.1f}",
+            f"system(ms): { _avg(latency_stats['system']):.1f}",
+        ]
+        for i, t in enumerate(stats_text):
+            cv2.putText(
+                grid,
+                t,
+                (10, 25 + i * 22),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 255, 0),
+                2,
+                cv2.LINE_AA,
+            )
+
         cv2.imshow("multi_cam (front, left, right, rear)", grid)
 
         if cv2.waitKey(1) == ord('q'):
