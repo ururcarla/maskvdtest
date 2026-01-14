@@ -53,7 +53,8 @@ class VitDetCarlaRuntime:
         if "_name" not in raw_cfg:
             raw_cfg["_name"] = Path(config_path).stem
         self.config = OmegaConf.to_container(raw_cfg, resolve=True)
-        self.device = device or get_pytorch_device()
+        device = device or get_pytorch_device()
+        self.device = torch.device(device) if isinstance(device, str) else device
 
         cfg = copy.deepcopy(self.config)
         n_classes = cfg.get("nb_classes", cfg["model"].get("classes", 1))
