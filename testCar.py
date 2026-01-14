@@ -118,7 +118,7 @@ try:
 
         # 组合成 2x2 窗口显示
         order = ["front", "left", "right", "rear"]
-        cell_w, cell_h = 512, 512
+        cell_w, cell_h = 1024, 1024
         blank = np.zeros((cell_h, cell_w, 3), dtype=np.uint8)
         cells = []
         for name in order:
