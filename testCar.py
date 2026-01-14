@@ -46,7 +46,7 @@ def get_gt_bboxes_for_camera(camera_actor, world, image_w, image_h, fov):
     world2cam = np.array(camera_actor.get_transform().get_inverse_matrix(), dtype=np.float32)
     boxes = []
     actors = world.get_actors()
-    targets = actors.filter('vehicle.*') + actors.filter('walker.*')
+    targets = list(actors.filter('vehicle.*')) + list(actors.filter('walker.*'))
     for actor in targets:
         bb = actor.bounding_box
         verts = bb.get_world_vertices(actor.get_transform())
