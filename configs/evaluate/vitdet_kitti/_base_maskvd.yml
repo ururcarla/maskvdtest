@@ -14,3 +14,5 @@ weights: "results/train/vitdet_kitti5/base_672/weights_epoch_7.pth"
 # weights: "results/train/vitdet_vid_baseline_lrsched_lr1e-5/base_672/weights_epoch_2.pth"
 # weights: "results/train/vitdet_kitti_vit_baseline_3classes_epochs_8/base_672/weights_epoch_6.pth"
 nb_classes: 4
+model:
+  classes: 4

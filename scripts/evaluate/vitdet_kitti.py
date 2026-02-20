@@ -22,7 +22,7 @@ from utils.evaluate import run_evaluations
 from utils.misc import dict_to_device, squeeze_dict, compute_detection_recall
 
 
-def evaluate_vitdet_metrics(device, model, data, config):
+def evaluate_vitdet_metrics(device, model, data, config, output_file):
     model.counting()
     model.clear_counts()
     n_frames = 0

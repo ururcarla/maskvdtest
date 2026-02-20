@@ -1,0 +1,113 @@
+model:
+  classes: 8
+  detectron2_config: configs/detectron/vitdet_b_vid.py
+  input_shape:
+  - 3
+  - 672
+  - 672
+  normalize_mean:
+  - 123.675
+  - 116.28
+  - 103.53
+  normalize_std:
+  - 58.395
+  - 57.12
+  - 57.375
+  output_channels: 256
+  patch_size:
+  - 16
+  - 16
+  scale_factors:
+  - 4.0
+  - 2.0
+  - 1.0
+  - 0.5
+  backbone_config:
+    backbone: windowed
+    depth: 12
+    position_encoding_size:
+    - 14
+    - 14
+    window_indices:
+    - 0
+    - 1
+    - 3
+    - 4
+    - 6
+    - 7
+    - 9
+    - 10
+    block_config:
+      dim: 768
+      relative_embedding_size:
+      - 64
+      - 64
+      heads: 12
+      mlp_ratio: 4
+      window_size:
+      - 14
+      - 14
+sparsity: 0.3
+margin: 0
+period: 8
+conf: 0.5
+_output: results/train/vitdet_argoverse/base_672/
+output_weights: results/train/vitdet_argoverse/base_672/weights_final.pth
+split: vid_train
+vanilla: false
+weights: results/train/vitdet_argoverse_baseline/base_672/weights_epoch_3.pth
+optimizer: AdamW
+optimizer_kwargs:
+  lr: 1.0e-05
+  weight_decay: 0.05
+lr_scheduler_kwargs:
+  min_lr: 1.0e-07
+  warmup_epochs: 1
+accum_iter: 8
+dataloader_workers: 8
+epochs: 10
+mask: None
+evaluate: false
+head_training:
+  head_epochs: 4
+  freeze_modules:
+  - preprocessing
+  - embedding
+  - backbone
+  partial_epochs: 4
+  partial_backbone_blocks:
+  - 8
+  - 9
+  - 10
+  - 11
+  partial_backbone_lr: 2.0e-06
+  head_optimizer_kwargs:
+    lr: 5.0e-05
+    weight_decay: 0.05
+  head_lr_scheduler_kwargs:
+    min_lr: 1.0e-07
+    warmup_epochs: 1
+  partial_optimizer_kwargs:
+    lr: 2.0e-06
+    weight_decay: 0.05
+  partial_lr_scheduler_kwargs:
+    min_lr: 1.0e-07
+    warmup_epochs: 1
+  full_optimizer_kwargs:
+    lr: 1.0e-06
+    weight_decay: 0.05
+  full_lr_scheduler_kwargs:
+    min_lr: 1.0e-07
+    warmup_epochs: 1
+  full_backbone_lr: 1.0e-06
+dataset:
+  name: argoverse
+  train_split: train
+  val_split: val
+  args:
+    argoverse:
+      img_root: ./data/argoverse/Argoverse-1.1/tracking
+      ann_files:
+        train: ./data/argoverse/Argoverse-HD/annotations/train.json
+        val: ./data/argoverse/Argoverse-HD/annotations/val.json
+_name: base_672_argoverse

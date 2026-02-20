@@ -16,3 +16,7 @@
 *.tar
 *.json
 *.md
+*.csv
+*.parquet
+_metadata
+unpacked

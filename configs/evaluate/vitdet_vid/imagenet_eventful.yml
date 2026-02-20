@@ -1,0 +1,6 @@
+_defaults:
+  - "_size_672.yml"
+  - "_tokenwise.yml"
+token_top_k: [256, 512]
+_output: "results/evaluate/imagenet/${_name}/"
+split: "vid_val"
